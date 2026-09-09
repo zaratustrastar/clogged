@@ -3,10 +3,11 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { useClaimReward } from "@/lib/hooks/useProtocolActions";
+import { CLAIM_WINDOW_DAYS } from "@/lib/constants";
 import type { ClaimableReward } from "@/lib/types";
 
 function ClaimRow({ reward }: { reward: ClaimableReward }) {
-  const { execute, status } = useClaimReward();
+  const { execute, status, error } = useClaimReward();
   const [claimed, setClaimed] = useState(false);
 
   async function onClaim() {
@@ -15,16 +16,19 @@ function ClaimRow({ reward }: { reward: ClaimableReward }) {
   }
 
   return (
-    <div className="flex items-center justify-between rounded border border-gold/30 bg-gold/5 px-4 py-3">
-      <div>
-        <p className="font-mono text-lg text-gold">{reward.amountEth.toFixed(3)} ETH</p>
-        <p className="text-xs text-ink-dim">
-          {reward.ticker} won Round #{reward.roundId}
-        </p>
+    <div className="rounded border border-gold/30 bg-gold/5 px-4 py-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-mono text-lg text-gold">{reward.amountEth.toFixed(4)} ETH</p>
+          <p className="text-xs text-ink-dim">
+            {reward.ticker} won Round #{reward.roundId}
+          </p>
+        </div>
+        <Button variant="gold" size="md" disabled={claimed || status === "pending"} onClick={onClaim}>
+          {claimed ? "Claimed" : status === "pending" ? "Claiming…" : "Claim ETH"}
+        </Button>
       </div>
-      <Button variant="gold" size="md" disabled={claimed || status === "pending"} onClick={onClaim}>
-        {claimed ? "Claimed" : status === "pending" ? "Claiming…" : "Claim winnings"}
-      </Button>
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
     </div>
   );
 }
@@ -36,13 +40,13 @@ export function ClaimableWinnings({ rewards }: { rewards: ClaimableReward[] }) {
 
   return (
     <section className="rounded-md border border-gold/40 bg-surface p-5">
-      <div className="flex items-baseline justify-between">
-        <h2 className="font-display text-base font-semibold text-ink">
-          {total.toFixed(3)} ETH ready to claim
-        </h2>
-      </div>
+      <p className="text-xs font-medium tracking-wide text-gold">YOUR WINNINGS</p>
+      <h2 className="mt-1 font-display text-2xl font-semibold text-ink">
+        {total.toFixed(4)} ETH claimable
+      </h2>
       <p className="mt-1 text-xs text-ink-dim">
-        Winnings aren&apos;t sent automatically — claim them below. Each has a 90-day window.
+        Your reward is reserved onchain until you claim it — nothing is sent automatically. Each
+        round has a {CLAIM_WINDOW_DAYS}-day claim window.
       </p>
       <div className="mt-4 flex flex-col gap-2">
         {rewards.map((r) => (

@@ -1,30 +1,34 @@
 "use client";
 
-import { useRoundStatus } from "@/lib/hooks/useTokenData";
+import { useReadContract } from "wagmi";
+import { useRoundStatus, useTokenList } from "@/lib/hooks/useTokenData";
 import { useNow } from "@/lib/hooks/useNow";
 import { formatCountdown, formatEth, formatCompact } from "@/lib/format";
 import { MAX_PUBLIC_TICKERS } from "@/lib/constants";
+import { addresses } from "@/lib/web3/addresses";
+import { isProtocolConfigured } from "@/lib/web3/env";
+import { rewardVaultAbi } from "@/lib/web3/abis/rewardVault";
 
-// Mock aggregate figures. TODO (live wiring): these should come from an
-// indexer's rollup (total volume, total launched) plus direct reads
-// (RewardVault's unallocated pool balance for "jackpot", EligibilityRegistry
-// candidate count for "qualified", TickerRegistry.publicTickerCount for
-// "launched").
-const MOCK_JACKPOT_ETH = 4.28;
-const MOCK_TOTAL_VOLUME_ETH = 1284;
-const MOCK_LAUNCHED_COUNT = 1348;
-
-function StatItems({ closesAt, qualified, now }: { closesAt: string; qualified: number; now: number }) {
+function StatItems({
+  closesAt,
+  qualified,
+  now,
+  jackpotEth,
+  launchedCount,
+}: {
+  closesAt: string;
+  qualified: number;
+  now: number;
+  jackpotEth: number | null;
+  launchedCount: number;
+}) {
   return (
     <>
-      <StatItem label="Jackpot" value={`${formatEth(MOCK_JACKPOT_ETH, { decimals: 2 })}`} tone="gold" />
+      <StatItem label="Jackpot" value={jackpotEth === null ? "—" : formatEth(jackpotEth, { decimals: 2 })} tone="gold" />
       <StatItem label="Qualified" value={String(qualified)} tone="cyan" />
       <StatItem label="Next draw" value={formatCountdown(closesAt, now)} tone="cyan" mono />
-      <StatItem label="Volume" value={`${formatCompact(MOCK_TOTAL_VOLUME_ETH)} ETH`} />
-      <StatItem
-        label="Launched"
-        value={`${formatCompact(MOCK_LAUNCHED_COUNT)} / ${formatCompact(MAX_PUBLIC_TICKERS)}`}
-      />
+      <StatItem label="Volume" value="—" />
+      <StatItem label="Launched" value={`${formatCompact(launchedCount)} / ${formatCompact(MAX_PUBLIC_TICKERS)}`} />
     </>
   );
 }
@@ -56,17 +60,36 @@ function StatItem({
 
 export function StatsTicker() {
   const { data: round } = useRoundStatus();
+  const { data: tokens } = useTokenList();
   const now = useNow();
+
+  const { data: unallocatedPool } = useReadContract({
+    address: addresses.rewardVault,
+    abi: rewardVaultAbi,
+    functionName: "unallocatedPool",
+    query: { enabled: isProtocolConfigured && Boolean(addresses.rewardVault), refetchInterval: 15_000 },
+  });
+
+  if (!isProtocolConfigured) {
+    return (
+      <div className="flex h-9 items-center justify-center border-b border-border bg-surface/60 text-xs text-ink-faint">
+        Protocol contracts not configured yet.
+      </div>
+    );
+  }
 
   if (!round) {
     return <div className="h-9 border-b border-border bg-surface/60" />;
   }
 
+  const jackpotEth = unallocatedPool !== undefined ? Number(unallocatedPool) / 1e18 : null;
+  const launchedCount = tokens?.length ?? 0;
+
   return (
     <div className="overflow-hidden border-b border-border bg-surface/60">
       <div className="flex w-max animate-[marquee_38s_linear_infinite] divide-x divide-border py-2 hover:[animation-play-state:paused]">
-        <StatItems closesAt={round.closesAt} qualified={round.candidateCount} now={now} />
-        <StatItems closesAt={round.closesAt} qualified={round.candidateCount} now={now} />
+        <StatItems closesAt={round.closesAt} qualified={round.candidateCount} now={now} jackpotEth={jackpotEth} launchedCount={launchedCount} />
+        <StatItems closesAt={round.closesAt} qualified={round.candidateCount} now={now} jackpotEth={jackpotEth} launchedCount={launchedCount} />
       </div>
       <style jsx>{`
         @keyframes marquee {

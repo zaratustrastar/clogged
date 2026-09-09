@@ -1,28 +1,22 @@
 "use client";
 
-import { useWalletAccount } from "@/lib/hooks/useWalletAccount";
-import { formatAddress } from "@/lib/format";
-import { Button } from "@/components/ui/Button";
+import { isWalletConfigured } from "@/lib/web3/env";
 
 export function WalletButton() {
-  const { address, isConnected, connect, disconnect } = useWalletAccount();
-
-  if (isConnected && address) {
+  if (!isWalletConfigured) {
     return (
       <button
-        onClick={disconnect}
-        title="Disconnect"
-        className="flex items-center gap-2 rounded border border-border-strong px-3 py-2 text-sm font-mono text-ink hover:border-danger/60 hover:text-danger"
+        disabled
+        title="Wallet connect is not configured yet (missing NEXT_PUBLIC_REOWN_PROJECT_ID)"
+        className="rounded border border-border-strong px-3 py-2 text-sm text-ink-faint opacity-50"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-cyan" />
-        {formatAddress(address)}
+        Connect wallet
       </button>
     );
   }
 
-  return (
-    <Button variant="secondary" size="md" onClick={connect}>
-      Connect wallet
-    </Button>
-  );
+  // The Reown AppKit web component handles the full connect/disconnect/
+  // account/network-switch UI itself - no custom wallet UI to build or
+  // maintain. Registered by createAppKit() in Web3Provider.tsx.
+  return <appkit-button balance="hide" size="md" />;
 }

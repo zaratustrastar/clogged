@@ -5,11 +5,11 @@
 export type Address = `0x${string}`;
 
 export type EligibilityStage =
-  | "too_new" // hasn't completed a full round yet (age gate)
-  | "building" // trading, but hasn't crossed the reserve threshold yet
-  | "qualifying" // above threshold, streak in progress (not yet 30 min)
-  | "qualified" // locked in as a candidate for the next draw
-  | "drawn"; // was included in a draw that has already resolved
+  | "building" // trading, but reserve hasn't crossed the qualification threshold yet
+  | "qualifying" // above threshold, 30-minute streak in progress
+  | "ready" // streak + progress requirements both met, but not yet confirmed by a trade/qualify() call
+  | "qualified" // confirmed on-chain as a candidate for the currently open round
+  | "drawn"; // was included in a round that has already resolved
 
 export interface TokenSummary {
   tokenId: number;

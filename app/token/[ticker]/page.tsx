@@ -8,12 +8,24 @@ import { TradeWidget } from "@/components/token/TradeWidget";
 import { ClogMechanicsPanel } from "@/components/token/ClogMechanicsPanel";
 import { DrawPanel } from "@/components/token/DrawPanel";
 import { ActivityFeed } from "@/components/token/ActivityFeed";
+import { TickerStory } from "@/components/token/TickerStory";
+import { RandomnessTrust } from "@/components/token/RandomnessTrust";
+import { HolderPayoutExplainer } from "@/components/token/HolderPayoutExplainer";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { isProtocolConfigured } from "@/lib/web3/env";
 
 export default function TokenDetailPage() {
   const params = useParams<{ ticker: string }>();
   const ticker = (params.ticker ?? "").toString();
   const { data: token, isLoading } = useTokenDetail(ticker);
+
+  if (!isProtocolConfigured) {
+    return (
+      <div className="content-container py-24 text-center">
+        <p className="text-sm text-ink-dim">Protocol contracts not configured yet.</p>
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -35,6 +47,9 @@ export default function TokenDetailPage() {
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_340px]">
         <div className="flex flex-col gap-6">
           <MarketInfo token={token} />
+          <TickerStory token={token} />
+          <HolderPayoutExplainer />
+          <RandomnessTrust />
 
           <div>
             <h2 className="mb-3 font-display text-sm font-semibold text-ink">Recent activity</h2>

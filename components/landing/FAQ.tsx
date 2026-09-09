@@ -1,3 +1,5 @@
+import { CLAIM_WINDOW_DAYS } from "@/lib/constants";
+
 const FAQS = [
   {
     q: "Does holding more of a token improve its chance of winning?",
@@ -5,7 +7,11 @@ const FAQS = [
   },
   {
     q: "What makes a token qualify?",
-    a: "A token needs to be past its first hour, have made meaningful progress through its bonding curve, and hold enough real reserve continuously for 30 minutes. Once it clears that bar, it's in the running for the next draw.",
+    a: "Two separate conditions, both required: curve progress has to reach 5% (this tracks the token's current position on its bonding curve, so heavy selling can lower it), and real ETH reserve has to stay at or above 0.229 ETH continuously for 30 minutes. Once both are true, a normal trade or a permissionless qualify() call confirms entry into whichever hourly round is currently open.",
+  },
+  {
+    q: "Can a token that just launched win the very first round?",
+    a: "Yes. There's no minimum token age and no waiting for a previous round to complete — a token launched minutes ago can qualify for the round that's currently open, including the very first round the protocol ever runs, as long as at least 3 memes qualify before it closes.",
   },
   {
     q: "How is the reward split if a token wins?",
@@ -13,7 +19,7 @@ const FAQS = [
   },
   {
     q: "Are rewards sent automatically?",
-    a: "No. Winnings sit in the reward vault until you claim them from your dashboard. There's a 90-day window to claim after a round resolves.",
+    a: `No. Winnings sit in the reward vault until you claim them from your dashboard. There's a ${CLAIM_WINDOW_DAYS}-day window to claim after a round resolves.`,
   },
   {
     q: "Can I trade the ticker itself, not just the token?",

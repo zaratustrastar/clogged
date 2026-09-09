@@ -7,7 +7,9 @@ import { ClaimableWinnings } from "@/components/dashboard/ClaimableWinnings";
 import { HoldingsTable } from "@/components/dashboard/HoldingsTable";
 import { LaunchedTable } from "@/components/dashboard/LaunchedTable";
 import { TickerNFTList } from "@/components/dashboard/TickerNFTList";
+import { PersonalProbability } from "@/components/dashboard/PersonalProbability";
 import { useWalletAccount } from "@/lib/hooks/useWalletAccount";
+import { isProtocolConfigured, isWalletConfigured } from "@/lib/web3/env";
 import {
   useHeldTokens,
   useLaunchedTokens,
@@ -39,8 +41,8 @@ export default function DashboardPage() {
           Connect to see tokens you hold, tokens you&apos;ve launched, and any winnings ready to
           claim.
         </p>
-        <Button className="mt-6" onClick={connect}>
-          Connect wallet
+        <Button className="mt-6" onClick={connect} disabled={!isWalletConfigured}>
+          {isWalletConfigured ? "Connect wallet" : "Wallet connect not configured"}
         </Button>
       </div>
     );
@@ -52,6 +54,14 @@ export default function DashboardPage() {
         <h1 className="font-display text-2xl font-semibold text-ink">Dashboard</h1>
         <p className="mt-1 text-sm text-ink-dim">Your tokens, launches, and rewards.</p>
       </div>
+
+      {!isProtocolConfigured && (
+        <p className="rounded border border-gold/40 bg-gold/5 px-4 py-3 text-sm text-gold">
+          Protocol contracts not configured yet.
+        </p>
+      )}
+
+      <PersonalProbability />
 
       {claimable.isLoading ? (
         <Skeleton className="h-28 w-full" />

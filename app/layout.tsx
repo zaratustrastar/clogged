@@ -2,12 +2,13 @@ import type { Metadata } from "next";
 import { Navbar } from "@/components/layout/Navbar";
 import { StatsTicker } from "@/components/layout/StatsTicker";
 import { Footer } from "@/components/layout/Footer";
+import { Web3Provider } from "@/lib/web3/Web3Provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CLOG — Launch a meme. Win the hour.",
+  title: "CLOG — Launch a meme. Own the ticker. Win the hour.",
   description:
-    "Launch a meme token for 0.002 ETH. Build enough real activity to qualify for the hourly draw — every qualified meme has equal odds.",
+    "Claim one of 7,777 unique CLOG tickers. Reach 5% curve progress and stay above the reserve threshold for 30 minutes to qualify for the hourly draw — every qualified meme has an equal chance.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -33,10 +34,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className="flex min-h-screen flex-col">
-        <Navbar />
-        <StatsTicker />
-        <main className="flex-1">{children}</main>
-        <Footer />
+        <Web3Provider>
+          <Navbar />
+          <StatsTicker />
+          <main className="flex-1">{children}</main>
+          <Footer />
+        </Web3Provider>
       </body>
     </html>
   );

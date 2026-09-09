@@ -11,7 +11,7 @@ const LABEL: Record<ActivityEvent["type"], string> = {
 
 export function ActivityFeed({ events }: { events: ActivityEvent[] }) {
   if (events.length === 0) {
-    return <p className="text-sm text-ink-dim">No activity yet.</p>;
+    return <p className="text-sm text-ink-dim">No onchain activity to show yet.</p>;
   }
 
   return (

@@ -22,10 +22,13 @@ const TABS: { id: Tab; label: string }[] = [
 
 function sortForTab(tokens: TokenSummary[], tab: Tab): TokenSummary[] {
   const copy = [...tokens];
-  if (tab === "trending") return copy.sort((a, b) => b.volume24hEth - a.volume24hEth);
+  // Real, derivable ranking only: market cap. 24h volume isn't safely
+  // derivable yet (see useTokenDiscovery), so "Trending" ranks by market
+  // cap rather than a field that's currently always zero for every token.
+  if (tab === "trending") return copy.sort((a, b) => b.marketCapEth - a.marketCapEth);
   if (tab === "next-draw")
     return copy
-      .filter((t) => t.eligibility === "qualified" || t.eligibility === "qualifying")
+      .filter((t) => t.eligibility === "qualified" || t.eligibility === "qualifying" || t.eligibility === "ready")
       .sort((a, b) => (b.eligibleSinceSeconds ?? 0) - (a.eligibleSinceSeconds ?? 0));
   return copy.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
@@ -43,18 +46,23 @@ function DrawCell({ token }: { token: TokenSummary }) {
   if (token.eligibility === "qualified") {
     return <span className="text-xs font-medium text-cyan">Qualified</span>;
   }
+  if (token.eligibility === "ready") {
+    return <span className="text-xs font-medium text-gold">Ready</span>;
+  }
   if (token.eligibility === "qualifying" && token.eligibleSinceSeconds !== null) {
-    const remaining = Math.max(0, REQUIRED_STREAK_SECONDS - token.eligibleSinceSeconds);
+    const elapsed = Math.floor(Date.now() / 1000) - token.eligibleSinceSeconds;
+    const remaining = Math.max(0, REQUIRED_STREAK_SECONDS - elapsed);
     const m = Math.floor(remaining / 60);
     return <span className="text-xs text-ink-dim">{m}m left</span>;
   }
-  if (token.eligibility === "building") {
-    return <span className="text-xs text-ink-faint">Building</span>;
-  }
   if (token.eligibility === "drawn") {
-    return <span className="text-xs text-ink-faint">Drawn</span>;
+    return <span className="text-xs text-ink-faint">Past draw</span>;
   }
-  return <span className="text-xs text-ink-faint">Too new</span>;
+  return (
+    <span className="text-xs text-ink-faint">
+      {token.curveProgressPct.toFixed(1)} / 5%
+    </span>
+  );
 }
 
 export function TokenTable({
@@ -156,11 +164,11 @@ export function TokenTable({
                   <td className="px-4 py-3">
                     <div className="flex w-24 items-center gap-2">
                       <ProgressBar pct={t.curveProgressPct} />
-                      <span className="font-mono text-xs text-ink-faint">{t.curveProgressPct}%</span>
+                      <span className="font-mono text-xs text-ink-faint">{t.curveProgressPct.toFixed(1)}%</span>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-right font-mono tabular text-xs text-ink">
-                    {formatCompact(t.volume24hEth)} ETH
+                    {t.volume24hEth > 0 ? `${formatCompact(t.volume24hEth)} ETH` : "—"}
                   </td>
                   <td className="px-4 py-3 text-right font-mono tabular text-xs font-medium text-ink">
                     {formatCompact(t.marketCapEth)} ETH

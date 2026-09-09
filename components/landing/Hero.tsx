@@ -8,7 +8,6 @@ import { CountdownClock } from "@/components/ui/CountdownClock";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useTokenList, useRoundStatus } from "@/lib/hooks/useTokenData";
 import { formatCompact } from "@/lib/format";
-import { LAUNCH_PRICE_ETH } from "@/lib/constants";
 
 export function Hero() {
   const { data: tokens } = useTokenList();
@@ -23,15 +22,18 @@ export function Hero() {
           <h1 className="font-display text-4xl font-semibold leading-[1.08] tracking-tight text-ink sm:text-5xl">
             Launch a meme.
             <br />
+            Own the ticker.
+            <br />
             Win the hour.
           </h1>
           <p className="mt-5 max-w-md text-base leading-relaxed text-ink-dim">
-            Launch a token for {LAUNCH_PRICE_ETH} ETH. Build enough real activity to qualify for the
-            hourly draw. Once you&apos;re in, every meme has the same chance to win.
+            Claim one of 7,777 unique CLOG tickers. Reach 5% curve progress and keep at least 0.229
+            ETH of real reserve for 30 minutes to enter the hourly draw. Every qualified meme gets one
+            equal chance — winning holders split the ETH jackpot.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link href="/launch">
-              <Button size="lg">Launch your token</Button>
+              <Button size="lg">Launch token</Button>
             </Link>
             <Link href="/explore">
               <Button size="lg" variant="secondary">

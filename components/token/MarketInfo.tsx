@@ -39,9 +39,9 @@ export function MarketInfo({ token }: { token: TokenDetail }) {
 
       <div className="mt-5 grid grid-cols-2 gap-4 border-t border-border pt-4 sm:grid-cols-4">
         <Stat label="Market cap" value={`${formatCompact(token.marketCapEth)} ETH`} />
-        <Stat label="24H volume" value={`${formatCompact(token.volume24hEth)} ETH`} />
+        <Stat label="24H volume" value={token.volume24hEth > 0 ? `${formatCompact(token.volume24hEth)} ETH` : "—"} />
         <Stat label="Reserve" value={`${formatEth(token.realReserveEth, { decimals: 2 })}`} />
-        <Stat label="Curve progress" value={`${token.curveProgressPct}%`} />
+        <Stat label="Curve progress" value={`${token.curveProgressPct.toFixed(1)}%`} />
       </div>
     </div>
   );
