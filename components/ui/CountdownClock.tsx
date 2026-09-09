@@ -9,7 +9,7 @@ export function CountdownClock({
   size = "lg",
 }: {
   targetIso: string;
-  size?: "lg" | "md";
+  size?: "lg" | "md" | "sm";
 }) {
   const now = useNow();
   const display = formatCountdown(targetIso, now);
@@ -19,7 +19,7 @@ export function CountdownClock({
     <span
       className={clsx(
         "font-mono tabular tracking-tight",
-        size === "lg" ? "text-6xl sm:text-7xl" : "text-2xl",
+        size === "lg" ? "text-6xl sm:text-7xl" : size === "md" ? "text-2xl" : "text-xl",
         isClosing ? "text-gold" : "text-ink"
       )}
     >

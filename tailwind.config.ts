@@ -38,9 +38,12 @@ const config: Config = {
           dim: "#7A5BAE",
           wash: "#211A33",
         },
+        // Semantic: sell / reset / failed-check states. Same role "danger"
+        // played before, warmed toward coral so it reads as a state signal
+        // rather than an alarm color.
         danger: {
-          DEFAULT: "#FF6B6B",
-          wash: "#2B1717",
+          DEFAULT: "#FF7A63",
+          wash: "#2E1913",
         },
       },
       fontFamily: {

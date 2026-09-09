@@ -42,12 +42,12 @@ function PctCell({ value }: { value: number | null }) {
   );
 }
 
-function DrawCell({ token }: { token: TokenSummary }) {
+function DrawCell({ token, qualifiedCount }: { token: TokenSummary; qualifiedCount: number }) {
   if (token.eligibility === "qualified") {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan">
         <span className="h-1.5 w-1.5 animate-glow-pulse rounded-full bg-cyan" />
-        Qualified
+        Qualified · 1/{qualifiedCount}
       </span>
     );
   }
@@ -56,9 +56,14 @@ function DrawCell({ token }: { token: TokenSummary }) {
   }
   if (token.eligibility === "qualifying" && token.eligibleSinceSeconds !== null) {
     const elapsed = Math.floor(Date.now() / 1000) - token.eligibleSinceSeconds;
-    const remaining = Math.max(0, REQUIRED_STREAK_SECONDS - elapsed);
-    const m = Math.floor(remaining / 60);
-    return <span className="text-xs text-ink-dim">{m}m left</span>;
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    const streakMin = REQUIRED_STREAK_SECONDS / 60;
+    return (
+      <span className="font-mono text-xs text-ink-dim">
+        Reserve {String(m).padStart(2, "0")}:{String(s).padStart(2, "0")} / {streakMin}m
+      </span>
+    );
   }
   if (token.eligibility === "drawn") {
     return <span className="text-xs text-ink-faint">Past draw</span>;
@@ -93,6 +98,11 @@ export function TokenTable({
     const sorted = sortForTab(filtered, tab);
     return limit ? sorted.slice(0, limit) : sorted;
   }, [tokens, tab, searchQuery, limit]);
+
+  const qualifiedCount = useMemo(
+    () => (tokens ?? []).filter((t) => t.eligibility === "qualified").length,
+    [tokens]
+  );
 
   return (
     <div>
@@ -179,7 +189,7 @@ export function TokenTable({
                     {formatCompact(t.marketCapEth)} ETH
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <DrawCell token={t} />
+                    <DrawCell token={t} qualifiedCount={qualifiedCount} />
                   </td>
                 </tr>
               ))}

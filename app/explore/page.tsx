@@ -12,14 +12,14 @@ function ExploreContent() {
 
   return (
     <div className="content-container py-10">
-      <h1 className="font-display text-2xl font-semibold text-ink">Explore tokens</h1>
+      <h1 className="font-display text-2xl font-semibold text-ink">Explore memes</h1>
       <p className="mt-1 text-sm text-ink-dim">
         {q ? (
           <>
             Showing results for <span className="text-ink">&ldquo;{q}&rdquo;</span>
           </>
         ) : (
-          "Every meme launched through CLOG."
+          "No need to launch — buy into any live meme and back it toward the draw."
         )}
       </p>
       <div className="mt-6">

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/ui/Panel";
 import { useTickerAvailability, useLaunchToken } from "@/lib/hooks/useProtocolActions";
 import { tokenProfileStore, isMetadataPersistenceConfigured } from "@/lib/metadata/TokenProfileStore";
-import { LAUNCH_PRICE_ETH, MAX_TICKER_LENGTH } from "@/lib/constants";
+import { LAUNCH_PRICE_ETH, MAX_TICKER_LENGTH, TICKER_OWNER_FEE_PCT_OF_TRADE } from "@/lib/constants";
 import { isProtocolConfigured } from "@/lib/web3/env";
 
 function AvailabilityMessage({ ticker }: { ticker: string }) {
@@ -130,8 +130,8 @@ export default function LaunchPage() {
 
   return (
     <div className="content-container py-12">
-      <h1 className="font-display text-2xl font-semibold text-ink sm:text-3xl">Claim your ticker</h1>
-      <p className="mt-1 text-sm text-ink-dim">One action, one fee. No liquidity to provide.</p>
+      <h1 className="font-display text-2xl font-semibold text-ink sm:text-3xl">Launch a meme</h1>
+      <p className="mt-1 text-sm text-ink-dim">Two onchain steps. No liquidity to provide.</p>
 
       {!isProtocolConfigured && (
         <p className="mt-4 rounded border border-gold/40 bg-gold/5 px-3 py-2 text-xs text-gold">
@@ -219,62 +219,82 @@ export default function LaunchPage() {
 
           {error && <p className="mt-4 text-xs text-danger">{error}</p>}
 
+          <div className="mt-6 flex items-center gap-2 text-xs">
+            <StepPill n={1} label="Secure ticker" active={phase === "idle" || phase === "committing"} done={phase === "waiting" || phase === "revealing"} />
+            <span className="text-ink-faint">→</span>
+            <StepPill n={2} label="Create token" active={phase === "waiting" || phase === "revealing"} done={false} />
+          </div>
+
           {phase === "idle" && (
-            <Button fullWidth size="lg" className="mt-6 shadow-glow-cyan" disabled={!canLaunch} onClick={onSecureTicker}>
+            <Button fullWidth size="lg" className="mt-4" disabled={!canLaunch} onClick={onSecureTicker}>
               {!isConnected ? "Connect wallet to launch" : "Secure ticker"}
             </Button>
           )}
           {phase === "committing" && (
-            <Button fullWidth size="lg" className="mt-6" disabled>
+            <Button fullWidth size="lg" className="mt-4" disabled>
               Confirm in wallet…
             </Button>
           )}
           {phase === "waiting" && (
-            <Button fullWidth size="lg" className="mt-6" disabled={remaining > 0} onClick={onCreateToken}>
+            <Button fullWidth size="lg" className="mt-4" disabled={remaining > 0} onClick={onCreateToken}>
               {remaining > 0 ? `Create token in ${remaining}s` : `Create token · ${LAUNCH_PRICE_ETH} ETH`}
             </Button>
           )}
           {phase === "revealing" && (
-            <Button fullWidth size="lg" className="mt-6" disabled>
+            <Button fullWidth size="lg" className="mt-4" disabled>
               Confirm in wallet…
             </Button>
           )}
-          {phase === "waiting" && (
-            <p className="mt-2 text-center text-xs text-ink-faint">
-              Ticker reserved — a short protocol delay protects against front-running before you create
-              the token.
-            </p>
-          )}
+          <p className="mt-2 text-center text-xs text-ink-faint">
+            {phase === "waiting"
+              ? "Ticker secured. A short protocol delay protects against front-running before you create the token."
+              : "Ticker reservation hides the ticker until it is secured onchain."}
+          </p>
         </Panel>
 
         <div className="flex flex-col gap-4">
           <div className="rounded-lg border border-border bg-surface p-5">
-            <p className="text-xs font-medium uppercase tracking-wide text-cyan">What you get</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-cyan">What you create</p>
             <ul className="mt-3 flex flex-col gap-2 text-sm text-ink-dim">
-              <li>One unique ticker</li>
-              <li>One meme token — 1B fixed supply</li>
-              <li>One TickerNFT</li>
-              <li>Access to hourly draws once qualified</li>
+              <li>Meme token</li>
+              <li>Unique ticker</li>
+              <li>TickerNFT</li>
+              <li>Access to hourly draws if qualified</li>
             </ul>
           </div>
           <div className="rounded-lg border border-border bg-surface p-5">
-            <p className="text-xs font-medium uppercase tracking-wide text-gold">What you pay</p>
-            <ul className="mt-3 flex flex-col gap-2 text-sm text-ink-dim">
-              <li>
-                <span className="font-mono text-ink">{LAUNCH_PRICE_ETH} ETH</span> launch fee
-              </li>
-              <li>Network gas — wallet estimate</li>
-            </ul>
+            <p className="text-xs font-medium uppercase tracking-wide text-gold">Cost</p>
+            <p className="mt-3 font-mono text-sm text-ink">{LAUNCH_PRICE_ETH} ETH</p>
+            <p className="text-xs text-ink-faint">+ network gas</p>
           </div>
           <div className="rounded-lg border border-border bg-surface p-5">
-            <p className="text-xs font-medium uppercase tracking-wide text-ink-faint">What you don&apos;t need</p>
-            <ul className="mt-3 flex flex-col gap-2 text-sm text-ink-dim">
-              <li>No liquidity to seed</li>
-              <li>No manual pool creation</li>
-            </ul>
+            <p className="text-xs font-medium uppercase tracking-wide text-violet">Liquidity</p>
+            <p className="mt-3 text-sm text-ink">0 ETH required</p>
+          </div>
+          <div className="rounded-lg border border-border bg-surface p-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-ink-faint">Ticker fee</p>
+            <p className="mt-3 text-sm text-ink">{TICKER_OWNER_FEE_PCT_OF_TRADE}% of every trade</p>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function StepPill({ n, label, active, done }: { n: number; label: string; active: boolean; done: boolean }) {
+  return (
+    <span
+      className={
+        "flex items-center gap-1.5 rounded-full border px-2.5 py-1 " +
+        (active
+          ? "border-cyan/40 bg-cyan/10 text-cyan"
+          : done
+          ? "border-border bg-surface-raised text-ink-dim"
+          : "border-border text-ink-faint")
+      }
+    >
+      <span className="font-mono">{n}</span>
+      {label}
+    </span>
   );
 }
