@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Local env files
+.env
+.env.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
