@@ -1,0 +1,104 @@
+// Core domain types for the CLOG launchpad frontend.
+// These mirror the protocol's on-chain shapes closely enough that swapping
+// mock data for real contract reads should not require changing consumers.
+
+export type Address = `0x${string}`;
+
+export type EligibilityStage =
+  | "too_new" // hasn't completed a full round yet (age gate)
+  | "building" // trading, but hasn't crossed the reserve threshold yet
+  | "qualifying" // above threshold, streak in progress (not yet 30 min)
+  | "qualified" // locked in as a candidate for the next draw
+  | "drawn"; // was included in a draw that has already resolved
+
+export interface TokenSummary {
+  tokenId: number;
+  ticker: string; // normalized, e.g. "CAT"
+  name: string;
+  imageUrl: string | null;
+  marketAddress: Address;
+  tokenAddress: Address;
+  creator: Address;
+  createdAt: string; // ISO timestamp
+  priceEth: number;
+  marketCapEth: number;
+  volume24hEth: number;
+  change1hPct: number | null;
+  change24hPct: number | null;
+  curveProgressPct: number; // 0-100, share of the 900M curve allocation sold
+  eligibility: EligibilityStage;
+  eligibleSinceSeconds: number | null; // seconds into the current streak, if qualifying
+}
+
+export interface TokenDetail extends TokenSummary {
+  tickerOwner: Address;
+  tickerTokenId: number;
+  realReserveEth: number;
+  clogRemainingTokens: number;
+  totalSupply: number;
+  curveAllocation: number;
+  clogAllocation: number;
+  recentActivity: ActivityEvent[];
+  drawHistory: DrawResult[];
+}
+
+export interface ActivityEvent {
+  id: string;
+  type: "buy" | "sell" | "launch" | "qualify";
+  address: Address;
+  amountEth: number | null;
+  amountTokens: number | null;
+  timestamp: string;
+}
+
+export interface DrawResult {
+  roundId: number;
+  resolvedAt: string;
+  winningTicker: string | null; // null if the draw was skipped (too few candidates)
+  candidateCount: number;
+  jackpotEth: number | null;
+  yourShareEth?: number; // present only in personalized contexts
+}
+
+export interface RoundStatus {
+  roundId: number;
+  opensAt: string;
+  closesAt: string;
+  candidateCount: number;
+  minCandidatesToDraw: number;
+}
+
+export interface UserPosition {
+  token: TokenSummary;
+  balanceTokens: number;
+  balancePctOfSupply: number;
+}
+
+export interface ClaimableReward {
+  roundId: number;
+  ticker: string;
+  tokenId: number;
+  amountEth: number;
+  windowClosesAt: string; // 90-day claim expiry
+}
+
+export interface OwnedTickerNFT {
+  tokenId: number;
+  ticker: string;
+  openSeaUrl: string;
+}
+
+export interface LaunchFormState {
+  ticker: string;
+  name: string;
+  imageFile: File | null;
+  imagePreviewUrl: string | null;
+}
+
+export type TickerAvailability =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "available" }
+  | { status: "taken" }
+  | { status: "reserved" } // CLOG itself
+  | { status: "invalid"; reason: string };
