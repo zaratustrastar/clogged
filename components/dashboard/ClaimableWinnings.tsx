@@ -39,7 +39,7 @@ export function ClaimableWinnings({ rewards }: { rewards: ClaimableReward[] }) {
   const total = rewards.reduce((sum, r) => sum + r.amountEth, 0);
 
   return (
-    <section className="rounded-md border border-gold/40 bg-surface p-5">
+    <section className="rounded-lg border border-gold/40 bg-surface p-5 shadow-glow-gold">
       <p className="text-xs font-medium tracking-wide text-gold">YOUR WINNINGS</p>
       <h2 className="mt-1 font-display text-2xl font-semibold text-ink">
         {total.toFixed(4)} ETH claimable

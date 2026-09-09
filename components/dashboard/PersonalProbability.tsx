@@ -21,7 +21,7 @@ export function PersonalProbability() {
   const chancePct = (heldQualifiedCount / qualified.length) * 100;
 
   return (
-    <div className="rounded-md border border-cyan/30 bg-cyan/5 p-5">
+    <div className="rounded-lg border border-cyan/30 bg-cyan/5 p-5 shadow-glow-cyan">
       <p className="text-xs font-medium tracking-wide text-cyan">
         YOU HOLD {heldQualifiedCount} OF {qualified.length} QUALIFIED MEMES
       </p>

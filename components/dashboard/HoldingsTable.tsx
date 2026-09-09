@@ -10,8 +10,8 @@ export function HoldingsTable({ positions }: { positions: UserPosition[] }) {
   if (positions.length === 0) {
     return (
       <EmptyState
-        title="No tokens held"
-        description="Tokens you buy will show up here, along with their draw status."
+        title="You don't hold a meme in this round yet"
+        description="Launch one or buy into a qualified meme."
         action={
           <Link href="/explore">
             <Button size="sm">Explore tokens</Button>

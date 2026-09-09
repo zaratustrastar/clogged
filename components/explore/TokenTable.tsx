@@ -44,7 +44,12 @@ function PctCell({ value }: { value: number | null }) {
 
 function DrawCell({ token }: { token: TokenSummary }) {
   if (token.eligibility === "qualified") {
-    return <span className="text-xs font-medium text-cyan">Qualified</span>;
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan">
+        <span className="h-1.5 w-1.5 animate-glow-pulse rounded-full bg-cyan" />
+        Qualified
+      </span>
+    );
   }
   if (token.eligibility === "ready") {
     return <span className="text-xs font-medium text-gold">Ready</span>;
@@ -98,8 +103,8 @@ export function TokenTable({
               key={t.id}
               onClick={() => setTab(t.id)}
               className={clsx(
-                "rounded px-3 py-1.5 text-sm font-medium transition-colors",
-                tab === t.id ? "bg-cyan/15 text-cyan" : "text-ink-dim hover:text-ink"
+                "rounded px-3 py-1.5 text-sm font-medium transition-all duration-200",
+                tab === t.id ? "bg-cyan/15 text-cyan shadow-glow-cyan" : "text-ink-dim hover:text-ink hover:bg-surface-raised"
               )}
             >
               {t.label}
