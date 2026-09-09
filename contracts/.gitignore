@@ -1,0 +1,23 @@
+# Foundry build artifacts (regenerate with `forge build`)
+out/
+cache/
+
+# npm dependencies (regenerate with `npm install`)
+node_modules/
+
+# Foundry deployment broadcast logs -- can contain sensitive tx data
+broadcast/
+
+# Local secrets / environment config
+.env
+.env.*
+!.env.mainnet.example
+*.pem
+*.key
+
+# Foundry incremental build cache
+*.tsbuildinfo
+
+# OS / editor cruft
+.DS_Store
+*.swp

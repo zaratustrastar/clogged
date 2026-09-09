@@ -1,0 +1,6 @@
+# The Solidity protocol lives in contracts/ - entirely separate toolchain
+# (Foundry), not part of the Next.js build. Excluding it from the Vercel
+# upload/build context avoids repeating the earlier incident where
+# TypeScript picked up tooling files from contracts/lib's vendored
+# OpenZeppelin/forge-std dependencies during typecheck.
+contracts/
