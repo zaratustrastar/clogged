@@ -1,6 +1,6 @@
 // Generated mechanically from the compiled contract via
-// `forge inspect src/RoundManager.sol:RoundManager abi --json`
-// (see /home/claude/protocol). Do not hand-edit - regenerate from the
+// `forge inspect src/RoundManager.sol:RoundManager abi --json`, run against
+// contracts/src/ at commit 13814ec. Do not hand-edit - regenerate from the
 // frozen contract source if the ABI needs to change.
 export const roundManagerAbi = [
   {
@@ -267,6 +267,19 @@ export const roundManagerAbi = [
   },
   {
     "type": "function",
+    "name": "requestRandomnessForRound",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "rewardVault",
     "inputs": [],
     "outputs": [
@@ -377,6 +390,19 @@ export const roundManagerAbi = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RandomnessRequestFailed",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false

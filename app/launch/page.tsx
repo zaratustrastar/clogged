@@ -7,7 +7,7 @@ import { ShieldCheck, XCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/ui/Panel";
 import { useTickerAvailability, useLaunchToken } from "@/lib/hooks/useProtocolActions";
-import { tokenProfileStore, isMetadataPersistenceConfigured } from "@/lib/metadata/TokenProfileStore";
+import { tokenProfileStore } from "@/lib/metadata/TokenProfileStore";
 import { LAUNCH_PRICE_ETH, MAX_TICKER_LENGTH, TICKER_OWNER_FEE_PCT_OF_TRADE } from "@/lib/constants";
 import { isProtocolConfigured } from "@/lib/web3/env";
 
@@ -67,6 +67,10 @@ export default function LaunchPage() {
   const [ticker, setTicker] = useState("");
   const [name, setName] = useState("");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [profilePersisted, setProfilePersisted] = useState<boolean | null>(null);
   const [xUrl, setXUrl] = useState("");
   const [telegramUrl, setTelegramUrl] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
@@ -80,7 +84,21 @@ export default function LaunchPage() {
   function onImageChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setImagePreview(URL.createObjectURL(file));
+    setImagePreview(URL.createObjectURL(file)); // local preview only, shown immediately
+    setUploadedImageUrl(null);
+    setImageUploadError(null);
+    setIsUploadingImage(true);
+
+    const formData = new FormData();
+    formData.append("image", file);
+    fetch("/api/upload-image", { method: "POST", body: formData })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Upload failed.");
+        setUploadedImageUrl(data.url);
+      })
+      .catch((err) => setImageUploadError(err instanceof Error ? err.message : "Upload failed."))
+      .finally(() => setIsUploadingImage(false));
   }
 
   async function onSecureTicker() {
@@ -90,14 +108,15 @@ export default function LaunchPage() {
   async function onCreateToken() {
     await reveal();
     if (tokenId !== null) {
-      await tokenProfileStore.set({
+      const result = await tokenProfileStore.set({
         tokenId,
         displayName: name || undefined,
-        imageUrl: imagePreview ?? undefined,
+        imageUrl: uploadedImageUrl ?? undefined,
         xUrl: xUrl || undefined,
         telegramUrl: telegramUrl || undefined,
         websiteUrl: websiteUrl || undefined,
       });
+      setProfilePersisted(result.persisted);
     }
   }
 
@@ -112,10 +131,10 @@ export default function LaunchPage() {
           Your token has launched with a fixed 1B supply. You now hold the TickerNFT for{" "}
           {ticker.toUpperCase()}.
         </p>
-        {!isMetadataPersistenceConfigured && (imagePreview || xUrl || telegramUrl || websiteUrl) && (
+        {profilePersisted === false && (imagePreview || xUrl || telegramUrl || websiteUrl) && (
           <p className="mt-2 max-w-sm text-xs text-gold">
-            Note: image and social links aren&apos;t saved anywhere yet — metadata persistence isn&apos;t
-            configured for this deployment.
+            Note: image and social links weren&apos;t saved — profile storage isn&apos;t configured for
+            this deployment right now.
           </p>
         )}
         <div className="mt-6 flex gap-3">
@@ -173,8 +192,8 @@ export default function LaunchPage() {
               <div className="flex h-12 w-12 items-center justify-center rounded border border-dashed border-border text-ink-faint">?</div>
             )}
             <label className="cursor-pointer rounded border border-border-strong px-3 py-2 text-xs font-medium text-ink-dim hover:text-ink">
-              Upload image
-              <input type="file" accept="image/*" className="hidden" onChange={onImageChange} disabled={phase !== "idle"} />
+              {isUploadingImage ? "Uploading…" : "Upload image"}
+              <input type="file" accept="image/*" className="hidden" onChange={onImageChange} disabled={phase !== "idle" || isUploadingImage} />
             </label>
           </div>
 
@@ -210,12 +229,7 @@ export default function LaunchPage() {
               />
             </div>
           </div>
-          {!isMetadataPersistenceConfigured && (
-            <p className="mt-2 text-xs text-ink-faint">
-              Image and social links aren&apos;t persisted anywhere yet. They won&apos;t be saved after this
-              page closes.
-            </p>
-          )}
+          {imageUploadError && <p className="mt-2 text-xs text-danger">Image upload: {imageUploadError}</p>}
 
           {error && <p className="mt-4 text-xs text-danger">{error}</p>}
 
@@ -236,8 +250,12 @@ export default function LaunchPage() {
             </Button>
           )}
           {phase === "waiting" && (
-            <Button fullWidth size="lg" className="mt-4" disabled={remaining > 0} onClick={onCreateToken}>
-              {remaining > 0 ? `Create token in ${remaining}s` : `Create token · ${LAUNCH_PRICE_ETH} ETH`}
+            <Button fullWidth size="lg" className="mt-4" disabled={remaining > 0 || isUploadingImage} onClick={onCreateToken}>
+              {isUploadingImage
+                ? "Waiting for image upload…"
+                : remaining > 0
+                ? `Create token in ${remaining}s`
+                : `Create token · ${LAUNCH_PRICE_ETH} ETH`}
             </Button>
           )}
           {phase === "revealing" && (

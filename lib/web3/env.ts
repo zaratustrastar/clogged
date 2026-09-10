@@ -17,6 +17,7 @@ export const env = {
   rpcUrl: optional("NEXT_PUBLIC_ROBINHOOD_RPC_URL"),
   explorerUrl: optional("NEXT_PUBLIC_ROBINHOOD_EXPLORER_URL"),
   deploymentBlock: optional("NEXT_PUBLIC_DEPLOYMENT_BLOCK"),
+  appUrl: optional("NEXT_PUBLIC_APP_URL"), // e.g. https://clog.run - used for absolute URLs
 
   tickerRegistry: optional("NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS"),
   tickerNFT: optional("NEXT_PUBLIC_TICKER_NFT_ADDRESS"),

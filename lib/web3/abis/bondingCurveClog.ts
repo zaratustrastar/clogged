@@ -1,6 +1,6 @@
 // Generated mechanically from the compiled contract via
-// `forge inspect src/BondingCurveClog.sol:BondingCurveClog abi --json`
-// (see /home/claude/protocol). Do not hand-edit - regenerate from the
+// `forge inspect src/BondingCurveClog.sol:BondingCurveClog abi --json`, run against
+// contracts/src/ at commit 13814ec. Do not hand-edit - regenerate from the
 // frozen contract source if the ABI needs to change.
 export const bondingCurveClogAbi = [
   {
@@ -33,6 +33,11 @@ export const bondingCurveClogAbi = [
       },
       {
         "name": "governance_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "eligibilityRegistry_",
         "type": "address",
         "internalType": "address"
       },
@@ -303,6 +308,19 @@ export const bondingCurveClogAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "eligibilityRegistry",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"

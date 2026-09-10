@@ -1,6 +1,6 @@
 // Generated mechanically from the compiled contract via
-// `forge inspect src/TickerNFT.sol:TickerNFT abi --json`
-// (see /home/claude/protocol). Do not hand-edit - regenerate from the
+// `forge inspect src/TickerNFT.sol:TickerNFT abi --json`, run against
+// contracts/src/ at commit 13814ec. Do not hand-edit - regenerate from the
 // frozen contract source if the ABI needs to change.
 export const tickerNFTAbi = [
   {
