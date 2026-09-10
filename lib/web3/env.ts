@@ -1,6 +1,7 @@
 // Central, validated access to every NEXT_PUBLIC_* env var the app needs.
 // Nothing here is a real value - it's all provided by the deployment
-// environment (Vercel project settings). Reading through this module
+// environment (/opt/clogged/.env.production on the production VPS; see
+// .env.production.example and VPS_RUNBOOK.md). Reading through this module
 // instead of process.env directly means:
 //   - one place lists every variable the app actually needs
 //   - `isProtocolConfigured` gives every page a single, consistent way to
