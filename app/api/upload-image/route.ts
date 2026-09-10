@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uploadImage, isR2Configured } from "@/lib/storage/r2";
+import { uploadImage, isFilesystemStorageConfigured } from "@/lib/storage/filesystem";
 
 export async function POST(request: NextRequest) {
-  if (!isR2Configured()) {
+  if (!isFilesystemStorageConfigured()) {
     return NextResponse.json({ error: "Image storage is not configured." }, { status: 503 });
   }
 

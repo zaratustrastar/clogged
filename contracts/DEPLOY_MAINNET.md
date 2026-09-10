@@ -1,272 +1,431 @@
-# CLOG — MAINNET Deployment Guide (Canary)
+# CLOG — MAINNET Deployment Runbook (Chainlink VRF v2.5 + CCIP)
 
-Target: **Robinhood Chain MAINNET** (chain id 4663) + **Arbitrum ONE mainnet**.
+Target: **Robinhood Chain Mainnet** (chain id 4663) + **Arbitrum One** (chain
+id 42161). Randomness architecture: Chainlink VRF v2.5 + CCIP, as decided —
+RH-VRF was evaluated and explicitly not adopted for this launch (see the
+randomness investigation in project history; "INSUFFICIENT EVIDENCE — KEEP
+CHAINLINK FOR NOW" stands until revisited after RH-VRF has more audit
+history).
 
-This is not a testnet exercise. Every address and transaction below is real
-once broadcast. The goal of this deployment is a small, deliberate canary —
-deploy the real immutable system, test it end to end with small real
-amounts, then scale up — not an immediate public launch.
+**Nothing in this document broadcasts a transaction.** Every dry-run command
+below omits `--broadcast`. The equivalent broadcast commands are given
+alongside each phase, clearly marked, for you to run yourself only when
+ready — I will never run them, and this response does not run them either.
 
-**This guide does not broadcast anything.** Every command below omits
-`--broadcast` deliberately; the equivalent broadcast commands are given
-separately at the end, for you to run only when you're ready.
+## What I could not verify from this environment
 
-## Status of this guide
+I have no web search tool and no network path to `rpc.mainnet.chain.robinhood.com`,
+`robinhoodchain.blockscout.com`, or Chainlink's documentation domains in this
+session (confirmed directly — all return `403 host_not_allowed` from this
+sandbox's own network egress). Every address below marked "operator-supplied"
+is exactly that — I have not independently confirmed it points at real,
+correctly-configured infrastructure. **Phase A's `MainnetPreflight.s.sol`
+run is what actually verifies this, and is not optional.**
 
-I could not independently resolve several required Chainlink infrastructure
-values (see "Values I could not verify" below) — I have no web search tool
-in this session, and confirmed directly that this environment's own network
-egress does not reach Chainlink's documentation domains, nor the Robinhood
-mainnet RPC/explorer URLs you supplied (all return 403 host_not_allowed
-from this sandbox's own proxy — the error message itself suggests these
-hosts could be added to network egress settings if you have access to that
-configuration). I have not fabricated any router address, chain selector, or
-key hash. Everything else below — env var names, script behavior, the VRF
-payment currency, deployment order, and commands — is either read directly
-from the actual script/contract source or is standard cast/forge tooling,
-not guessed.
+## Operator-supplied configuration (verify via Phase A before trusting)
+
+```
+Robinhood Chain Mainnet:      chain id 4663
+  RPC:                        https://rpc.mainnet.chain.robinhood.com
+  Explorer:                   https://robinhoodchain.blockscout.com
+  CCIP Router:                0x06fC836cf9839B1cd891C440A0a45242DA6Ae1c9
+  CCIP selector:              6180753054346818345
+
+Arbitrum One:                 chain id 42161
+  CCIP Router:                0x141fa059441E0ca23ce184B6A78bafD2A517DdE8
+  CCIP selector:              4949039107694359620
+  VRF v2.5 Coordinator:       0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e
+  Intended keyHash:           0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409
+
+Permanent NFT base URI:       https://clog.run/api/ticker-metadata/
+```
+
+## Signer setup — encrypted keystore, never a raw key anywhere
+
+Foundry's encrypted keystore is used for every command below instead of a
+raw private key in an env var, a flag, or shell history. This is a one-time
+setup per wallet:
+
+```bash
+# Prompts interactively for the private key (masked, never echoed) and a
+# keystore password to encrypt it with. The private key is never accepted
+# as a CLI argument here, so it can never appear in shell history or a
+# process listing. Run once per wallet (you have two: Robinhood, Arbitrum).
+cast wallet import clog-deployer-robinhood --interactive
+cast wallet import clog-deployer-arbitrum --interactive
+```
+
+Every `forge script`/`cast send` command below that needs to sign uses
+`--account clog-deployer-robinhood` or `--account clog-deployer-arbitrum`
+(Foundry prompts for the keystore password at broadcast time, not before) —
+never `--private-key`. If your deployment wallet is a hardware wallet
+Foundry supports (Ledger/Trezor via `--ledger`/`--trezor`), that is strictly
+preferable to even an encrypted keystore for a real mainnet deployment —
+use it if available; the commands below show the keystore form since that's
+guaranteed compatible with forge 1.8.1/cast 1.8.1 without assuming hardware
+you may not have.
+
+Verify the keystore resolves to the wallet you expect before doing anything
+else:
+
+```bash
+cast wallet address --account clog-deployer-robinhood
+cast wallet address --account clog-deployer-arbitrum
+```
 
 ---
 
-## 1. Confirmed network details (as you supplied them)
+## PHASE A — Preflight (read-only, no broadcast)
 
-**Robinhood Chain Mainnet:**
-- Chain ID: 4663
-- Public RPC: https://rpc.mainnet.chain.robinhood.com
-- Explorer: https://robinhoodchain.blockscout.com
+Run `MainnetPreflight.s.sol` once per chain. It auto-detects which chain
+it's on from `block.chainid` and runs the checks relevant to that side —
+see the script's own doc comments for exactly what each check does and
+which Chainlink interface it reads (nothing here is a guessed ABI; every
+interface is read directly from the vendored `@chainlink/contracts`/
+`@chainlink/contracts-ccip` packages this repo already depends on).
 
-Per your instruction: use this public RPC for deployment/read verification
-now; do not wire it into the eventual production keeper/frontend if a
-managed Robinhood endpoint becomes available.
+```bash
+export CCIP_ROUTER_ROBINHOOD=0x06fC836cf9839B1cd891C440A0a45242DA6Ae1c9
+export ARBITRUM_CHAIN_SELECTOR=4949039107694359620
+export SAFE_ADDRESS=<your Robinhood Safe address>
+export DEPLOYER_ADDRESS=$(cast wallet address --account clog-deployer-robinhood)
 
-I was not able to reach either URL from this environment to independently
-confirm chain id 4663 responds at that RPC, or that the explorer is live —
-both are blocked by this sandbox's own network egress, the same restriction
-that blocks Chainlink's docs. Worth a quick manual check
-(cast chain-id --rpc-url https://rpc.mainnet.chain.robinhood.com, see
-section 3) before relying on it for real.
+forge script script/MainnetPreflight.s.sol --rpc-url https://rpc.mainnet.chain.robinhood.com --sig "run()"
+```
 
-**Arbitrum One mainnet:** standard, long-established chain (id 42161) — not
-something I'm treating as in question, only the specific Chainlink
-infrastructure addresses on it (see section 2).
+```bash
+export CCIP_ROUTER_ARBITRUM=0x141fa059441E0ca23ce184B6A78bafD2A517DdE8
+export VRF_COORDINATOR_ARBITRUM=0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e
+export ROBINHOOD_CHAIN_SELECTOR=6180753054346818345
+export ARBITRUM_GOVERNANCE_ADDRESS=<your Arbitrum governance address, if a Safe>
+export DEPLOYER_ADDRESS=$(cast wallet address --account clog-deployer-arbitrum)
+# VRF_SUBSCRIPTION_ID: leave unset for now if you haven't created it yet (Phase G) -
+# the script explicitly skips that one check rather than failing when it's absent.
 
-## 2. Values I could not verify — resolve these yourself, do not guess
+forge script script/MainnetPreflight.s.sol --rpc-url https://arb1.arbitrum.io/rpc --sig "run()"
+```
 
-**Robinhood Chain Mainnet:**
-- CCIP_ROUTER_ROBINHOOD — CCIP Router address on Robinhood Chain Mainnet.
-- ARBITRUM_CHAIN_SELECTOR — Arbitrum One's CCIP chain selector, as listed
-  against Robinhood Chain Mainnet's own CCIP Directory entry.
+**Do not proceed to Phase B until both runs pass with no `FAIL:` output.**
+A `getFee() reverted` line is logged but does not fail the run by itself —
+investigate it, but it's the one check documented as best-effort (see the
+script's own comments for why).
 
-**Arbitrum One mainnet:**
-- CCIP_ROUTER_ARBITRUM — CCIP Router address on Arbitrum One.
-- ROBINHOOD_CHAIN_SELECTOR — Robinhood Chain Mainnet's own CCIP chain
-  selector, as listed in the directory.
-- VRF_COORDINATOR_ARBITRUM — Chainlink VRF v2.5 Coordinator address on
-  Arbitrum One.
-- VRF_KEY_HASH — the VRF v2.5 key hash (gas lane) for Arbitrum One.
+---
 
-**The most important open question, explicitly**: does CCIP support BOTH
-directions — Robinhood Mainnet -> Arbitrum One (needed for
-ChainlinkRandomnessProvider.requestRandomness) AND Arbitrum One ->
-Robinhood Mainnet (needed for VRFWrapperOnArbitrum.relayRandomness)? A lane
-existing one way does not imply it exists the other way. Check Robinhood
-Chain Mainnet's own CCIP Directory entry for an outbound lane to Arbitrum
-One, and separately check whether Arbitrum One's entry lists an outbound
-lane back to Robinhood Chain Mainnet. If only one direction exists, this
-architecture cannot work as designed and that is a real blocker to surface
-before deploying anything, not something to work around.
+## PHASE B — Robinhood Mainnet deployment
 
-Check directly at https://docs.chain.link/ccip/directory (Robinhood Chain
-Mainnet may or may not have an entry at all - this has not been confirmed)
-and https://docs.chain.link/vrf/v2-5/supported-networks for the VRF values,
-or ask me again in a session with search enabled.
+Deploys `EligibilityRegistry`, `RoundManager`, `RewardVault`, `TickerNFT`,
+`TickerRegistry`, `ChainlinkRandomnessProvider`, and the `TimelockController`
+that becomes `governance` — permanently, with no transfer path. Needs:
+`CCIP_ROUTER_ROBINHOOD`, `ARBITRUM_CHAIN_SELECTOR`, `SAFE_ADDRESS`,
+`FEE_MULTISIG_ADDRESS`, `TICKER_NFT_BASE_URI`.
 
-## 3. Onchain verification (run these yourself — I cannot reach these RPCs)
-
-Once you have real values for the addresses/selectors above, run these cast
-commands before broadcasting anything. I've written them exactly as I would
-run them if this environment could reach the RPCs — it can't (same network
-restriction as section 1), so these are for you to run directly.
-
-    # Non-empty bytecode at both CCIP Routers
-    cast code $CCIP_ROUTER_ROBINHOOD --rpc-url $ROBINHOOD_MAINNET_RPC_URL
-    cast code $CCIP_ROUTER_ARBITRUM --rpc-url $ARBITRUM_ONE_RPC_URL
-
-    # Non-empty bytecode at the VRF Coordinator
-    cast code $VRF_COORDINATOR_ARBITRUM --rpc-url $ARBITRUM_ONE_RPC_URL
-
-    # Robinhood Router recognizes Arbitrum One as a destination -- the exact
-    # call depends on the router's ABI (isChainSupported(uint64) on many
-    # Chainlink CCIP router versions; confirm against the actual deployed
-    # router's interface, since this varies by CCIP version):
-    cast call $CCIP_ROUTER_ROBINHOOD "isChainSupported(uint64)(bool)" $ARBITRUM_CHAIN_SELECTOR --rpc-url $ROBINHOOD_MAINNET_RPC_URL
-
-    # Arbitrum One Router recognizes Robinhood Mainnet as a destination (the
-    # reverse-direction check -- do not skip this one):
-    cast call $CCIP_ROUTER_ARBITRUM "isChainSupported(uint64)(bool)" $ROBINHOOD_CHAIN_SELECTOR --rpc-url $ARBITRUM_ONE_RPC_URL
-
-    # Sanity-check your own RPC before relying on it
-    cast chain-id --rpc-url $ROBINHOOD_MAINNET_RPC_URL   # expect 4663
-    cast chain-id --rpc-url $ARBITRUM_ONE_RPC_URL         # expect 42161
-
-For getFee() in both directions, the cleanest real check is deploying both
-contracts first (steps 1-2 in section 5, without --broadcast) and letting
-their own constructors/first calls exercise getFee naturally, since building
-a correctly-shaped EVM2AnyMessage by hand outside the contracts themselves
-risks testing something subtly different from what the real contracts will
-actually send. If you want an isolated pre-deployment check anyway, cast
-call against the router's getFee(uint64,(bytes,bytes,(address,uint256)[],address,bytes))
-function needs a fully-encoded message struct matching whichever CCIP
-version these routers run — worth confirming the exact function signature
-from the router's own verified source on the explorer first, since this has
-changed across CCIP versions.
-
-**Do not broadcast anything in section 5 until every check above passes.**
-
-## 4. VRF subscription — what you need to create
-
-Confirmed directly from the actual contract source (VRFWrapperOnArbitrum.sol,
-nativePayment: false in its VRF request extra-args) — this is not something
-I looked up externally, it's how the contract you're about to deploy is
-actually written, and changing it would require a Solidity edit that's
-explicitly out of scope right now:
-
-- The wrapper pays for VRF requests via the subscription's LINK balance,
-  not native ETH. You need to fund the subscription with real LINK on
-  Arbitrum One, not ETH.
-- Separately, VRFWrapperOnArbitrum's own ETH balance is needed for a
-  completely different purpose — the CCIP return relay fee
-  (relayRandomness's outbound message back to Robinhood Chain). This is
-  native ETH, paid directly by the wrapper contract, unrelated to the VRF
-  subscription's LINK balance. Both need to be funded; neither substitutes
-  for the other.
-- Consumer address: once DeployArbitrumWrapper.s.sol has run and you have
-  the real VRFWrapperOnArbitrum address, add that address as a consumer on
-  your VRF v2.5 subscription — via Chainlink's subscription manager UI, or
-  vrfCoordinator.addConsumer(subscriptionId, wrapperAddress) directly. Do
-  this before the wrapper's first real request, or requests will revert (an
-  unregistered consumer is rejected by the Coordinator itself).
-
-I am not inventing a subscription ID anywhere in this guide or the env
-template — VRF_SUBSCRIPTION_ID is left blank for you to fill in once you've
-created the real one.
-
-## 5. Deployment order
-
-Run in exactly this order.
-
-### Step 1 — DeployRobinhoodChain.s.sol (Robinhood Chain Mainnet)
-
-Deploys EligibilityRegistry, RoundManager, RewardVault, TickerNFT,
-TickerRegistry, ChainlinkRandomnessProvider, and the TimelockController that
-becomes governance for everything — permanently, with no transfer path.
-Needs: CCIP_ROUTER_ROBINHOOD, ARBITRUM_CHAIN_SELECTOR, SAFE_ADDRESS,
-FEE_MULTISIG_ADDRESS, TICKER_NFT_BASE_URI.
+```bash
+export TICKER_NFT_BASE_URI=https://clog.run/api/ticker-metadata/
+export FEE_MULTISIG_ADDRESS=<your fee multisig address>
+```
 
 Dry run:
 
-    forge script script/DeployRobinhoodChain.s.sol \
-      --rpc-url $ROBINHOOD_MAINNET_RPC_URL \
-      --sig "run()"
+```bash
+forge script script/DeployRobinhoodChain.s.sol \
+  --rpc-url https://rpc.mainnet.chain.robinhood.com \
+  --sig "run()"
+```
 
-Broadcast (only once section 3's checks pass and you're actually ready):
+Broadcast (only after Phase A passes and you are actually ready):
 
-    forge script script/DeployRobinhoodChain.s.sol \
-      --rpc-url $ROBINHOOD_MAINNET_RPC_URL \
-      --broadcast \
-      --sig "run()"
+```bash
+forge script script/DeployRobinhoodChain.s.sol \
+  --rpc-url https://rpc.mainnet.chain.robinhood.com \
+  --account clog-deployer-robinhood \
+  --broadcast \
+  --sig "run()"
+```
 
-Read the logged output for the 7 deployed addresses and the two required
-governance actions it prints — you'll need the ChainlinkRandomnessProvider
-address in step 3.
+---
 
-### Step 2 — DeployArbitrumWrapper.s.sol (Arbitrum One mainnet)
+## PHASE C — Record deployment block + addresses
 
-Deploys VRFWrapperOnArbitrum and proposes ownership to
-ARBITRUM_GOVERNANCE_ADDRESS. Needs: VRF_COORDINATOR_ARBITRUM,
-CCIP_ROUTER_ARBITRUM, ROBINHOOD_CHAIN_SELECTOR, VRF_KEY_HASH,
-VRF_SUBSCRIPTION_ID, ARBITRUM_GOVERNANCE_ADDRESS.
+From the script's logged output, record all seven, exactly as printed —
+you will need every one of them in later phases and for the frontend
+handoff:
+
+```
+Deployment block:            _______________
+TimelockController:          _______________
+EligibilityRegistry:         _______________
+ChainlinkRandomnessProvider: _______________
+RoundManager:                _______________
+RewardVault:                 _______________
+TickerNFT:                   _______________
+TickerRegistry:              _______________
+```
+
+---
+
+## PHASE D — Queue `RoundManager.setRewardVault(...)`
+
+Governance-gated, behind the 48h timelock (Phase K/L), not executed now.
+The deploy script itself logs the exact target + calldata for this — see
+its own console output from Phase B. Queue it through the Safe once you're
+ready to start the 48h clock (Phase K covers scheduling all timelocked
+actions together).
+
+---
+
+## PHASE E — Deploy `VRFWrapperOnArbitrum`
+
+Needs: `VRF_COORDINATOR_ARBITRUM`, `CCIP_ROUTER_ARBITRUM`,
+`ROBINHOOD_CHAIN_SELECTOR`, `VRF_KEY_HASH`, `VRF_SUBSCRIPTION_ID` (from
+Phase G — do this phase after creating the subscription), and
+`ARBITRUM_GOVERNANCE_ADDRESS`.
+
+```bash
+export VRF_KEY_HASH=0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409
+export VRF_SUBSCRIPTION_ID=<from Phase G>
+export ARBITRUM_GOVERNANCE_ADDRESS=<your Arbitrum governance address>
+```
 
 Dry run:
 
-    forge script script/DeployArbitrumWrapper.s.sol \
-      --rpc-url $ARBITRUM_ONE_RPC_URL \
-      --sig "run()"
+```bash
+forge script script/DeployArbitrumWrapper.s.sol \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --sig "run()"
+```
 
 Broadcast:
 
-    forge script script/DeployArbitrumWrapper.s.sol \
-      --rpc-url $ARBITRUM_ONE_RPC_URL \
-      --broadcast \
-      --sig "run()"
+```bash
+forge script script/DeployArbitrumWrapper.s.sol \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --account clog-deployer-arbitrum \
+  --broadcast \
+  --sig "run()"
+```
 
-After broadcasting: arbitrumGovernance must call acceptOwnership()
-(ConfirmedOwner's two-step transfer), and you must register this wrapper as
-a VRF subscription consumer (section 4) before it can request randomness.
+Record the deployed `VRFWrapperOnArbitrum` address now.
 
-### Step 3 — WireCrossChain.s.sol (once per chain)
+---
 
-Deploys nothing — only checks real code exists at both addresses, then logs
-the exact target + calldata for the two remaining governance actions
-(ChainlinkRandomnessProvider.setWrapper, VRFWrapperOnArbitrum.setProvider).
-Needs: CHAINLINK_RANDOMNESS_PROVIDER (from step 1), VRF_WRAPPER_ON_ARBITRUM
-(from step 2). This script has no broadcast mode of its own — it never
-sends a transaction, only reads and logs:
+## PHASE F — Arbitrum ConfirmedOwner ownership sequence
 
-    forge script script/WireCrossChain.s.sol \
-      --rpc-url $ROBINHOOD_MAINNET_RPC_URL \
-      --sig "run()"
+`VRFWrapperOnArbitrum` inherits `VRFConsumerBaseV2Plus`'s `ConfirmedOwner` —
+a two-step transfer. Distinguish the three roles explicitly, since they are
+not necessarily the same address:
 
-    forge script script/WireCrossChain.s.sol \
-      --rpc-url $ARBITRUM_ONE_RPC_URL \
-      --sig "run()"
+- **deployer** — `clog-deployer-arbitrum`, whoever broadcast Phase E. Owns
+  the contract immediately after deployment.
+- **current wrapper owner** — the deployer, until this phase completes.
+- **`ARBITRUM_GOVERNANCE_ADDRESS`** — who Phase E's constructor already
+  called `transferOwnership(ARBITRUM_GOVERNANCE_ADDRESS)` on, as its final
+  step (see the deploy script's own source) — this only *proposes* the
+  transfer; it is not accepted yet.
 
-### After all three: required governance actions
+`ARBITRUM_GOVERNANCE_ADDRESS` itself must call `acceptOwnership()` to
+complete the transfer:
 
-Every onlyGovernance function is behind the 48h timelock by design — no
-bootstrap bypass, even for day-one wiring. Queue these through the Safe once
-the real addresses exist:
+```bash
+cast send <VRFWrapperOnArbitrum address> "acceptOwnership()" \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --account <whichever keystore controls ARBITRUM_GOVERNANCE_ADDRESS>
+```
 
-1. RoundManager.setRewardVault(rewardVault) — on Robinhood Chain Mainnet.
-2. ChainlinkRandomnessProvider.setWrapper(wrapperOnArbitrum) — on Robinhood
-   Chain Mainnet.
-3. VRFWrapperOnArbitrum.setProvider(providerOnRobinhoodChain) — on Arbitrum
-   One, queued through whatever ARBITRUM_GOVERNANCE_ADDRESS actually is,
-   not the Robinhood Chain timelock.
+If `ARBITRUM_GOVERNANCE_ADDRESS` is a Safe, this is a Safe transaction, not
+a plain `cast send` from an EOA keystore — queue it through the Safe UI
+instead, calling `acceptOwnership()` on the wrapper.
 
-The protocol cannot resolve any draw until all three clear their delays and
-execute.
+Verify:
 
-## 6. Canary approach — no protocol parameter changes
+```bash
+cast call <VRFWrapperOnArbitrum address> "owner()(address)" --rpc-url https://arb1.arbitrum.io/rpc
+# expect: ARBITRUM_GOVERNANCE_ADDRESS, not the deployer
+```
 
-Per your instruction, this deployment uses the real, unmodified production
-economics — LAUNCH_PRICE (0.002 ETH), the 0.5% trade tax and its 20/10/70
-split, the 5% progress gate, the 0.229 ETH reserve threshold, the 30-minute
-timer, MIN_DRAW_CANDIDATES = 3, the 1-hour round duration — none of these
-are being loosened or tightened for testing purposes, since they're not
-meant to be test-only values and changing them would misrepresent the
-system you're actually canary-testing. "Small real amounts" means launching
-a small number of memes and trading small ETH amounts against the real,
-unmodified contracts — not changing the contracts' own thresholds to make
-testing easier.
+---
 
-## 7. Ongoing funding (not one-time)
+## PHASE G — Chainlink VRF subscription (you create/fund this personally)
 
-Two ETH balances need to stay funded for draws to keep resolving, plus the
-separate LINK requirement from section 4:
+Confirmed directly from `VRFWrapperOnArbitrum.sol`'s actual source
+(`nativePayment: false`) — the subscription is funded with **LINK on
+Arbitrum One**, not native ETH:
 
-- ChainlinkRandomnessProvider's ETH balance (Robinhood Chain Mainnet) —
-  pays the outbound CCIP fee on every randomness request. If it runs dry,
-  rounds still close and open on schedule — only the request itself fails
-  and becomes retryable via requestRandomnessForRound() once topped up.
-- VRFWrapperOnArbitrum's ETH balance (Arbitrum One) — pays the return CCIP
-  fee on every relayRandomness() call. If it runs dry, the fulfilled word is
-  still safely stored — only the relay fails and becomes retryable via
-  relayRandomness() once topped up.
-- The VRF subscription's LINK balance (Arbitrum One) — entirely separate
-  from the wrapper's own ETH balance above (section 4).
+1. Create a VRF v2.5 subscription via Chainlink's subscription manager UI
+   on Arbitrum One.
+2. Fund it with LINK.
+3. Add the deployed `VRFWrapperOnArbitrum` address (Phase E/C) as a
+   consumer — either via the subscription manager UI, or:
 
-No specific amounts are prescribed anywhere in this guide — they depend on
-live CCIP fee pricing at request/relay time, which isn't knowable in
-advance. For a canary deployment, fund modestly and monitor rather than
-over-provisioning.
+```bash
+cast send 0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e \
+  "addConsumer(uint256,address)" <VRF_SUBSCRIPTION_ID> <VRFWrapperOnArbitrum address> \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --account clog-deployer-arbitrum
+```
+
+(This must be sent by the subscription's owner — whichever account created
+it in step 1.)
+
+Verify existence/config read-only:
+
+```bash
+cast call 0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e \
+  "getSubscription(uint256)(uint96,uint96,uint64,address,address[])" <VRF_SUBSCRIPTION_ID> \
+  --rpc-url https://arb1.arbitrum.io/rpc
+```
+
+Do this before Phase E if you want `VRF_SUBSCRIPTION_ID` ready at wrapper
+deploy time — the order between E and G only matters in that
+`addConsumer` (step 3 above) needs the wrapper's address, which doesn't
+exist until after Phase E. Practical order: create + fund the subscription
+first (steps 1-2), deploy the wrapper (Phase E), then add it as a consumer
+(step 3).
+
+---
+
+## PHASE H — Wrapper configuration: `setProvider(...)`
+
+Governance-gated on Arbitrum One, called by `ARBITRUM_GOVERNANCE_ADDRESS`
+(not the deployer) once ownership transfer (Phase F) is complete:
+
+```bash
+cast send <VRFWrapperOnArbitrum address> "setProvider(address)" <ChainlinkRandomnessProvider address from Phase C> \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --account <whichever keystore controls ARBITRUM_GOVERNANCE_ADDRESS>
+```
+
+If `ARBITRUM_GOVERNANCE_ADDRESS` is a Safe, queue this as a Safe
+transaction instead. `script/WireCrossChain.s.sol` (Phase J) logs this
+exact calldata for you if you'd rather copy it from there than hand-type
+the address.
+
+---
+
+## PHASE I — CCIP funding (ETH, not LINK — separate from Phase G)
+
+Two ETH balances, entirely separate from the VRF subscription's LINK
+balance above:
+
+- **`ChainlinkRandomnessProvider`** (Robinhood Chain) — pays the outbound
+  CCIP fee on every randomness request.
+- **`VRFWrapperOnArbitrum`** (Arbitrum One) — pays the return CCIP fee on
+  every `relayRandomness()` call.
+
+No specific amount is prescribed — live CCIP fee pricing isn't knowable in
+advance from here. Use Phase A's representative `getFee()` quotes as your
+starting reference point, then fund modestly and monitor rather than
+over-provisioning for a canary launch:
+
+```bash
+cast send <ChainlinkRandomnessProvider address> --value <amount> \
+  --rpc-url https://rpc.mainnet.chain.robinhood.com \
+  --account clog-deployer-robinhood
+
+cast send <VRFWrapperOnArbitrum address> --value <amount> \
+  --rpc-url https://arb1.arbitrum.io/rpc \
+  --account clog-deployer-arbitrum
+```
+
+If either balance runs dry later, the system degrades to a delay, never a
+halt or a lost result — round closing/opening and VRF fulfillment are
+fully decoupled from CCIP funding (see the protocol's own autonomy
+architecture) — the affected step just becomes retryable once refunded.
+
+---
+
+## PHASE J — Cross-chain wiring: `WireCrossChain.s.sol`
+
+Deploys nothing — reads real bytecode at both addresses (chain-aware: it
+detects which side it's on from which address actually has local code, per
+the real fix already on `main` — it will refuse to run if both or neither
+address has code, rather than guessing) and logs the exact calldata for
+whichever governance action applies to the chain you point it at:
+
+```bash
+export CHAINLINK_RANDOMNESS_PROVIDER=<from Phase C>
+export VRF_WRAPPER_ON_ARBITRUM=<from Phase E/C>
+
+forge script script/WireCrossChain.s.sol --rpc-url https://rpc.mainnet.chain.robinhood.com --sig "run()"
+forge script script/WireCrossChain.s.sol --rpc-url https://arb1.arbitrum.io/rpc --sig "run()"
+```
+
+The Robinhood run logs `ChainlinkRandomnessProvider.setWrapper(...)`'s
+calldata (queue via Phase K, timelocked). The Arbitrum run logs
+`VRFWrapperOnArbitrum.setProvider(...)`'s calldata — if you haven't already
+executed Phase H by hand, use this output for it instead (same call,
+whichever is more convenient).
+
+---
+
+## PHASE K — Robinhood 48h timelock: schedule everything
+
+Every `onlyGovernance` function on Robinhood Chain is behind the
+`TimelockController`'s 48h delay by design — no bootstrap bypass, even for
+day-one wiring. Schedule both required actions together through the Safe
+(as timelock proposer):
+
+1. `RoundManager.setRewardVault(rewardVault)` — calldata from Phase D.
+2. `ChainlinkRandomnessProvider.setWrapper(wrapperOnArbitrum)` — calldata
+   from Phase J's Robinhood run.
+
+The protocol cannot resolve any draw until both have cleared the delay and
+executed (Phase L). Trading/launching does not depend on either — see the
+First Telos section below.
+
+---
+
+## PHASE L — After 48 hours: execute + verify
+
+Execute both scheduled actions through the Safe once the delay has passed,
+then read back state to prove the configuration is actually correct rather
+than assuming the transactions succeeded silently:
+
+```bash
+cast call <RoundManager address> "rewardVault()(address)" --rpc-url https://rpc.mainnet.chain.robinhood.com
+# expect: the real RewardVault address from Phase C
+
+cast call <ChainlinkRandomnessProvider address> "wrapperOnArbitrum()(address)" --rpc-url https://rpc.mainnet.chain.robinhood.com
+# expect: the real VRFWrapperOnArbitrum address from Phase E/C
+```
+
+---
+
+## PHASE M — Frontend env handoff
+
+Populate the five frontend contract addresses + deployment block in
+`/opt/clogged/.env.production` (see `POST_DEPLOY_HANDOFF.md` for the exact
+list and sequence). No ABI regeneration is needed merely because addresses
+changed — ABIs are keyed by contract shape, not address. Then, on the VPS:
+`npm run build` (required — these are `NEXT_PUBLIC_*` values, baked in at
+build time) followed by `sudo systemctl restart clog` (see
+`VPS_RUNBOOK.md`).
+
+---
+
+## PHASE N — First manual live test
+
+This is the **First Telos** (see below) — reachable immediately after
+Phase M, without waiting for Phases G/H/J/K/L to complete. Connect a real
+wallet, launch a real ticker, confirm the TickerNFT mints, confirm the
+image/profile persist, confirm the metadata endpoint resolves, buy, sell,
+confirm real balances/reserve/progress update in the UI.
+
+The **Second Telos** — 3 qualified memes → close round → Chainlink → VRF →
+winner → claim — only becomes reachable once Phases G through L have all
+completed. Keeper automation comes after that manual draw succeeds, not
+before.
+
+---
+
+## Product mechanics — unchanged, not renegotiable at deployment time
+
+Launch fee 0.002 ETH (10% protocol multisig / 90% WinnerPot), 1B supply
+(900M curve / 100M CLOG reserve, 0% to the creator), 0.5% trade tax (0.10%
+ticker owner / 0.05% protocol / 0.35% WinnerPot), 5% *current* curve
+progress (not a permanent high-water mark) + 0.229 ETH real reserve held
+continuously for 30 minutes to qualify, minimum 3 candidates to draw,
+uniform 1-in-N odds, TWAB-weighted claims with a 90-day window. None of
+this changes for a canary launch — "small real amounts" means launching a
+small number of memes and trading small ETH amounts against the real,
+unmodified contracts.

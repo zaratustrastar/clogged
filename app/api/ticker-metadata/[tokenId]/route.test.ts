@@ -15,6 +15,7 @@ vi.mock("viem", async (importOriginal) => {
 const CONFIGURED_ENV = {
   NEXT_PUBLIC_ROBINHOOD_CHAIN_ID: "4663",
   NEXT_PUBLIC_ROBINHOOD_RPC_URL: "https://rpc.mainnet.chain.robinhood.com",
+  NEXT_PUBLIC_APP_URL: "https://clog.run",
   NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS: "0x1111111111111111111111111111111111111a",
   NEXT_PUBLIC_TICKER_NFT_ADDRESS: "0x1111111111111111111111111111111111111b",
   NEXT_PUBLIC_ELIGIBILITY_REGISTRY_ADDRESS: "0x1111111111111111111111111111111111111c",
@@ -87,8 +88,10 @@ describe("app/api/ticker-metadata/[tokenId] route", () => {
         { trait_type: "Token ID", value: 920001 },
       ])
     );
-    // No custom image was ever set -> the deterministic fallback image route
-    expect(data.image).toContain("/api/ticker-fallback-image/CAT");
+    // No custom image was ever set -> the canonical generated TickerNFT
+    // artwork route, keyed by tokenId (never the meme-fallback-by-ticker
+    // scheme this replaced).
+    expect(data.image).toBe("https://clog.run/api/ticker-image/920001");
     // Ownership must never appear as a field in this metadata (an "owner"
     // mentioned in descriptive prose about protocol mechanics is fine and
     // expected - what must never appear is an actual owner address/field
@@ -97,12 +100,12 @@ describe("app/api/ticker-metadata/[tokenId] route", () => {
     expect(data.attributes.some((a: { trait_type: string }) => a.trait_type === "Owner")).toBe(false);
   });
 
-  it("merges a real Postgres profile's image/displayName into the response", async () => {
+  it("uses canonical generated artwork even when a profile has an uploaded meme image, but still uses the profile's displayName in the description", async () => {
     const profileStore = new PostgresTokenProfileStore();
     await profileStore.set({
       tokenId: 920002,
       displayName: "Cat Coin",
-      imageUrl: "https://assets.clog.run/token-images/real-cat.png",
+      imageUrl: "https://clog.run/uploads/real-cat-meme.png",
     });
 
     readContractMock.mockResolvedValueOnce("CAT");
@@ -110,7 +113,12 @@ describe("app/api/ticker-metadata/[tokenId] route", () => {
     const res = await GET(makeRequest("920002"), { params: { tokenId: "920002" } });
     const data = await res.json();
 
-    expect(data.image).toBe("https://assets.clog.run/token-images/real-cat.png");
+    // TickerNFT artwork is never the uploaded meme image - it represents
+    // ticker ownership, not the meme itself (see lib/tickerArtwork.ts).
+    // The uploaded image is retained and used elsewhere in the product,
+    // just never as NFT metadata.image.
+    expect(data.image).toBe("https://clog.run/api/ticker-image/920002");
+    expect(data.image).not.toContain("uploads");
     expect(data.description).toContain("Cat Coin");
   });
 

@@ -1,16 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createPublicClient, http } from "viem";
-import { robinhoodChain } from "@/lib/web3/chain";
-import { addresses } from "@/lib/web3/addresses";
-import { isProtocolConfigured, env } from "@/lib/web3/env";
-import { tickerRegistryAbi } from "@/lib/web3/abis/tickerRegistry";
+import { lookupTickerForTokenId } from "@/lib/onchain/tickerLookup";
 import { PostgresTokenProfileStore } from "@/lib/metadata/PostgresTokenProfileStore";
+import { env } from "@/lib/web3/env";
 
 const profileStore = new PostgresTokenProfileStore();
-
-function getClient() {
-  return createPublicClient({ chain: robinhoodChain, transport: http(env.rpcUrl) });
-}
 
 export async function GET(request: NextRequest, { params }: { params: { tokenId: string } }) {
   const tokenIdNum = Number(params.tokenId);
@@ -18,37 +11,29 @@ export async function GET(request: NextRequest, { params }: { params: { tokenId:
     return NextResponse.json({ error: "tokenId must be a non-negative integer" }, { status: 400 });
   }
 
-  if (!isProtocolConfigured || !addresses.tickerRegistry) {
+  const result = await lookupTickerForTokenId(tokenIdNum);
+
+  if (result.status === "not_configured") {
     return NextResponse.json({ error: "Protocol contracts not configured yet." }, { status: 503 });
   }
-
-  const tokenId = BigInt(tokenIdNum);
-  const client = getClient();
-
-  let ticker: string;
-  try {
-    ticker = await client.readContract({
-      address: addresses.tickerRegistry,
-      abi: tickerRegistryAbi,
-      functionName: "tickerOf",
-      args: [tokenId],
-    });
-  } catch {
+  if (result.status === "rpc_error") {
     return NextResponse.json({ error: "Failed to read onchain state." }, { status: 502 });
   }
-
-  // tickerOf returns "" (Solidity's zero-value for an unset string mapping
-  // entry) for any tokenId that was never actually launched - this is the
-  // real, authoritative existence check, not a guess.
-  if (!ticker) {
+  if (result.status === "not_found") {
     return NextResponse.json({ error: "Token does not exist." }, { status: 404 });
   }
 
+  const ticker = result.ticker;
   const profile = await profileStore.get(tokenIdNum);
 
-  const image = profile?.imageUrl
-    ? profile.imageUrl
-    : `${baseUrl(request)}/api/ticker-fallback-image/${encodeURIComponent(ticker)}`;
+  // TickerNFT artwork is deliberately NEVER the user-uploaded meme image.
+  // The NFT represents ownership of the ticker identity itself (closer to
+  // ENS than to meme art) - every ticker shares the same recognizable CLOG
+  // collection look, generated deterministically, not stored anywhere. The
+  // uploaded meme image (profile?.imageUrl, if any) remains fully intact
+  // and in use elsewhere in the product (token pages, token cards) - it's
+  // simply never referenced as NFT metadata.image.
+  const image = `${baseUrl(request)}/api/ticker-image/${tokenIdNum}`;
 
   // The launch form only ever collects a display name, ticker, image, and
   // socials - there is no separate "description" field to pull from, so one
@@ -73,9 +58,8 @@ export async function GET(request: NextRequest, { params }: { params: { tokenId:
   return NextResponse.json(metadata, {
     headers: {
       // Ownership is deliberately not part of this metadata (see the route's
-      // own docs) and profile imagery/description can be updated
-      // independently of anything onchain, so a moderate, revalidatable
-      // cache is appropriate - not immutable, not uncached.
+      // own docs) and the canonical artwork is fully deterministic, so a
+      // long, revalidatable cache is appropriate.
       "Cache-Control": "public, max-age=300, stale-while-revalidate=3600",
     },
   });
