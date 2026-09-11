@@ -47,3 +47,38 @@ describe("translateContractError - expiry misclassification fix", () => {
     expect(translateContractError(err)).not.toBe(EXPIRY_MESSAGE);
   });
 });
+
+const SLIPPAGE_MESSAGE = "Price moved more than expected — try again.";
+
+describe("translateContractError - slippage misclassification fix", () => {
+  it("F. a genuine, structured 'slippage' revert reason translates to the slippage message", () => {
+    const err = makeStructuredRevert("slippage");
+    expect(translateContractError(err)).toBe(SLIPPAGE_MESSAGE);
+  });
+
+  it("E. THE ORIGINAL BUG: a plain error whose text merely mentions 'minEthOut' or 'minTotalTokensOut' (viem's own ABI parameter echo, present for every buy/sell call regardless of what reverted) is no longer misclassified as slippage", () => {
+    const sellErr = new Error(
+      'The contract function "sell" reverted.\n\nContract Call:\n  function:  sell(uint256 tokenAmount, uint256 minEthOut, uint256 deadline)\n  args:      (10000000000000000000000, 0, 1735689000)'
+    );
+    expect(translateContractError(sellErr)).not.toBe(SLIPPAGE_MESSAGE);
+
+    const buyErr = new Error(
+      'The contract function "buy" reverted.\n\nContract Call:\n  function:  buy(uint256 minTotalTokensOut, uint256 deadline)'
+    );
+    expect(translateContractError(buyErr)).not.toBe(SLIPPAGE_MESSAGE);
+  });
+
+  it("E. the exact real-world case: an ERC20 insufficient-allowance revert on sell must not be classified as slippage merely because the sell ABI signature mentions minEthOut", () => {
+    const err = new Error(
+      'The contract function "sell" reverted with the following reason:\nERC20InsufficientAllowance(0x797Ffb6EeBd43269E9dF3AD4f2d8EA9Bc0298803, 0, 10000000000000000000000)\n\nContract Call:\n  function:  sell(uint256 tokenAmount, uint256 minEthOut, uint256 deadline)'
+    );
+    const message = translateContractError(err);
+    expect(message).not.toBe(SLIPPAGE_MESSAGE);
+    expect(message).toBe("Approve the token before selling.");
+  });
+
+  it("a real slippage revert is still correctly classified even when the diagnostic text also mentions 'deadline'", () => {
+    const err = makeStructuredRevert("slippage");
+    expect(translateContractError(err)).toBe(SLIPPAGE_MESSAGE);
+  });
+});

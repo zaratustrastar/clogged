@@ -7,12 +7,13 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { encodeAbiParameters, keccak256, decodeEventLog, BaseError, ContractFunctionRevertedError, type Address, type Log } from "viem";
 import { addresses } from "@/lib/web3/addresses";
 import { isProtocolConfigured } from "@/lib/web3/env";
 import { tickerRegistryAbi } from "@/lib/web3/abis/tickerRegistry";
 import { bondingCurveClogAbi } from "@/lib/web3/abis/bondingCurveClog";
+import { memeTokenAbi } from "@/lib/web3/abis/memeToken";
 import { eligibilityRegistryAbi } from "@/lib/web3/abis/eligibilityRegistry";
 import { rewardVaultAbi } from "@/lib/web3/abis/rewardVault";
 import { RESERVED_TICKER, MAX_TICKER_LENGTH, MIN_TICKER_LENGTH, LAUNCH_PRICE_ETH } from "@/lib/constants";
@@ -25,20 +26,33 @@ import type { TickerAvailability } from "@/lib/types";
 // ---------------------------------------------------------------------------
 export function translateContractError(err: unknown): string {
   // Prefer viem's own structured revert reason when available - the exact,
-  // clean string the contract actually reverted with (e.g. "expired"),
-  // never the surrounding diagnostic text (function signature, ABI
-  // parameter names, args) that matching the raw error message text below
-  // risks false-triggering on. This specifically fixes a real
-  // misclassification: buy/sell's ABI signature is
-  // buy(uint256 minTotalTokensOut, uint256 deadline) - viem's own
-  // diagnostic output mentions "deadline" for EVERY call to buy/sell,
-  // regardless of what actually reverted, so matching that word alone is
-  // not evidence of an actual expiry. BondingCurveClog's real expiry
-  // revert reason is the bare string "expired" - checked directly here.
+  // clean string the contract actually reverted with (e.g. "expired",
+  // "slippage"), never the surrounding diagnostic text (function
+  // signature, ABI parameter names, args) that matching the raw error
+  // message text below risks false-triggering on. This specifically fixes
+  // two real misclassifications: buy/sell's ABI signature includes
+  // "deadline", "minTotalTokensOut", and "minEthOut" as parameter names -
+  // viem's own diagnostic output echoes these for EVERY call to buy/sell,
+  // regardless of what actually reverted, so matching those words alone
+  // is not evidence of an actual expiry or slippage failure.
+  // BondingCurveClog's real revert reasons are the bare strings "expired"
+  // and "slippage" - checked directly here.
   if (err instanceof BaseError) {
     const revertError = err.walk((e) => e instanceof ContractFunctionRevertedError);
-    if (revertError instanceof ContractFunctionRevertedError && revertError.reason === "expired") {
-      return "Transaction took too long and expired — try again.";
+    if (revertError instanceof ContractFunctionRevertedError) {
+      if (revertError.reason === "expired") return "Transaction took too long and expired — try again.";
+      if (revertError.reason === "slippage") return "Price moved more than expected — try again.";
+      // ERC20's own standard insufficient-allowance revert - normally the
+      // allowance-aware sell UI (see useTokenAllowance/useApproveToken)
+      // prevents this from ever being reached, but this is a defense-in-
+      // depth fallback for anything that slips through (e.g. an allowance
+      // that was reduced by another transaction between the check and the
+      // actual sell). Checked via the decoded custom error name when
+      // available, since ERC20InsufficientAllowance is a custom error
+      // (OpenZeppelin 5.x), not a plain string revert reason.
+      if (revertError.data?.errorName === "ERC20InsufficientAllowance") {
+        return "Approve the token before selling.";
+      }
     }
   }
 
@@ -57,7 +71,7 @@ export function translateContractError(err: unknown): string {
   if (/TickerRegistry: public ticker cap reached/.test(raw)) return "All 7,777 tickers have been claimed.";
   if (/exceeds available token inventory|exceeds.*inventory/i.test(raw)) return "That amount is too large for the current curve depth — try a smaller amount.";
   if (/insufficient.*balance|ERC20.*balance/i.test(raw)) return "Insufficient token balance for this trade.";
-  if (/slippage|minTotalTokensOut|minEthOut/i.test(raw)) return "Price moved more than expected — try again.";
+  if (/insufficient allowance|ERC20InsufficientAllowance|exceeds allowance/i.test(raw)) return "Approve the token before selling.";
 
   // Fall back to the first line of the revert reason if one is present,
   // otherwise a short generic message - never the full raw error blob.
@@ -96,6 +110,7 @@ function useContractWrite() {
         queryClient.invalidateQueries({ queryKey: ["clog-token-detail"] });
         queryClient.invalidateQueries({ queryKey: ["clog-held-tokens"] });
         queryClient.invalidateQueries({ queryKey: ["clog-round-status"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-allowance"] });
         return hash;
       } catch (e) {
         setStatus("error");
@@ -400,7 +415,11 @@ export function useBuyToken() {
 }
 
 /** Real BondingCurveClog.sell(tokenAmount, minEthOut, deadline), same
- * simulate-then-write pattern as buy. */
+ * simulate-then-write pattern as buy. Takes the exact token amount as a
+ * bigint (already converted via parseUnits at the call site - see
+ * TradeWidget) rather than a JS number - an 18-decimal ERC20 amount can
+ * exceed what a JS number can represent exactly, so no floating-point
+ * arithmetic ever touches this value. */
 export function useSellToken() {
   const { address } = useAccount();
   const { run, status, error, txHash, reset } = useContractWrite();
@@ -408,9 +427,8 @@ export function useSellToken() {
   const publicClient = usePublicClient();
 
   const execute = useCallback(
-    async (marketAddress: Address, tokenAmount: number) => {
+    async (marketAddress: Address, tokenAmountWei: bigint) => {
       if (!publicClient) throw new Error("no client");
-      const amountWei = BigInt(Math.round(tokenAmount * 1e18));
 
       await run(async () => {
         const latestBlock = await publicClient.getBlock();
@@ -420,7 +438,7 @@ export function useSellToken() {
           address: marketAddress,
           abi: bondingCurveClogAbi,
           functionName: "sell",
-          args: [amountWei, 0n, deadline],
+          args: [tokenAmountWei, 0n, deadline],
           account: address,
         });
         const [expectedOut] = result;
@@ -429,11 +447,100 @@ export function useSellToken() {
           address: marketAddress,
           abi: bondingCurveClogAbi,
           functionName: "sell",
-          args: [amountWei, minOut, deadline],
+          args: [tokenAmountWei, minOut, deadline],
         });
       });
     },
     [address, publicClient, run, writeContractAsync]
+  );
+
+  return { execute, status, error, txHash, reset };
+}
+
+/** Real MemeToken.allowance(owner, spender) - BondingCurveClog.sell()
+ * calls token.transferFrom(msg.sender, address(this), tokenAmount)
+ * internally, so the market must be an approved spender before a sell can
+ * succeed. React Query-backed so it can be invalidated (see
+ * useApproveToken below) the moment an approval confirms. */
+/** Whether a sell needs an ERC20 approval first, and what state that
+ * check is in. Extracted as a pure function (no react-query/wagmi
+ * involved) specifically so this decision is directly testable.
+ * allowance is null while the allowance read hasn't resolved yet at all -
+ * distinct from a resolved allowance of 0n. */
+export function computeSellApprovalState(params: {
+  allowance: bigint | null;
+  sellAmountWei: bigint | null;
+}): { checkingAllowance: boolean; hasEnoughAllowance: boolean; needsApproval: boolean } {
+  const { allowance, sellAmountWei } = params;
+  const hasRealAmount = sellAmountWei !== null && sellAmountWei > 0n;
+
+  if (!hasRealAmount) {
+    return { checkingAllowance: false, hasEnoughAllowance: false, needsApproval: false };
+  }
+  if (allowance === null) {
+    return { checkingAllowance: true, hasEnoughAllowance: false, needsApproval: false };
+  }
+  const hasEnoughAllowance = allowance >= (sellAmountWei as bigint);
+  return { checkingAllowance: false, hasEnoughAllowance, needsApproval: !hasEnoughAllowance };
+}
+
+/** Real MemeToken.allowance(owner, spender) - BondingCurveClog.sell()
+ * calls token.transferFrom(msg.sender, address(this), tokenAmount)
+ * internally, so the market must be an approved spender before a sell can
+ * succeed. React Query-backed so it can be invalidated (see
+ * useApproveToken below) the moment an approval confirms. */
+export function useTokenAllowance(tokenAddress: Address | undefined, owner: Address | undefined, spender: Address | undefined) {
+  const publicClient = usePublicClient();
+
+  const query = useQuery({
+    queryKey: ["clog-allowance", tokenAddress, owner, spender],
+    enabled: Boolean(tokenAddress && owner && spender && publicClient),
+    refetchInterval: 15_000,
+    queryFn: async (): Promise<bigint> => {
+      if (!tokenAddress || !owner || !spender || !publicClient) throw new Error("not ready");
+      return publicClient.readContract({
+        address: tokenAddress,
+        abi: memeTokenAbi,
+        functionName: "allowance",
+        args: [owner, spender],
+      });
+    },
+  });
+
+  return {
+    allowance: query.data ?? null,
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    error: query.error ? String(query.error) : null,
+  };
+}
+
+/** Real MemeToken.approve(spender, amount). Approves the exact requested
+ * amount (not an unlimited/max approval) - see the report for why exact,
+ * per-trade approval was preferred here. */
+export function useApproveToken() {
+  const { run, status, error, txHash, reset } = useContractWrite();
+  const { writeContractAsync } = useWriteContract();
+  const queryClient = useQueryClient();
+
+  const execute = useCallback(
+    async (tokenAddress: Address, spender: Address, amountWei: bigint) => {
+      await run(() =>
+        writeContractAsync({
+          address: tokenAddress,
+          abi: memeTokenAbi,
+          functionName: "approve",
+          args: [spender, amountWei],
+        })
+      );
+      // useContractWrite's shared invalidation list doesn't know about
+      // allowance queries (they're keyed by token+owner+spender, not a
+      // fixed name) - invalidate explicitly here so the sell UI sees the
+      // new allowance immediately rather than waiting out the 15s
+      // refetchInterval above.
+      queryClient.invalidateQueries({ queryKey: ["clog-allowance"] });
+    },
+    [run, writeContractAsync, queryClient]
   );
 
   return { execute, status, error, txHash, reset };

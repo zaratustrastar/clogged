@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useAccount, useSimulateContract } from "wagmi";
+import { parseUnits } from "viem";
 import { Button } from "@/components/ui/Button";
-import { useBuyToken, useSellToken } from "@/lib/hooks/useProtocolActions";
+import { useBuyToken, useSellToken, useTokenAllowance, useApproveToken, computeSellApprovalState } from "@/lib/hooks/useProtocolActions";
 import { TRADE_TAX_PCT } from "@/lib/constants";
 import { bondingCurveClogAbi } from "@/lib/web3/abis/bondingCurveClog";
 import { env } from "@/lib/web3/env";
@@ -14,8 +15,21 @@ import clsx from "clsx";
  * against BondingCurveClog's actual buy/sell function (there is no separate
  * external quote function on the contract; see the implementation report).
  * Not an approximation: this is the exact result the real transaction would
- * produce if submitted right now. */
-function useTradeQuote(marketAddress: `0x${string}`, side: "buy" | "sell", amount: number) {
+ * produce if submitted right now.
+ *
+ * The sell simulation is only ever attempted once allowance is already
+ * sufficient - sell() itself calls token.transferFrom() internally, so
+ * simulating it against insufficient allowance would revert for a reason
+ * that has nothing to do with price. That revert must never be shown as
+ * "price moved" - it isn't attempted at all until the approval-gated sell
+ * button (below) confirms allowance is enough. */
+function useTradeQuote(
+  marketAddress: `0x${string}`,
+  side: "buy" | "sell",
+  ethAmount: number,
+  sellAmountWei: bigint | null,
+  sellAllowanceSufficient: boolean
+) {
   const { address } = useAccount();
 
   // Refreshed periodically rather than frozen at mount: a token page left
@@ -36,25 +50,26 @@ function useTradeQuote(marketAddress: `0x${string}`, side: "buy" | "sell", amoun
   }, []);
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
 
-  const valid = amount > 0 && Boolean(address);
+  const validBuy = ethAmount > 0 && Boolean(address);
+  const validSell = sellAmountWei !== null && sellAmountWei > 0n && Boolean(address) && sellAllowanceSufficient;
 
   const buySim = useSimulateContract({
     address: marketAddress,
     abi: bondingCurveClogAbi,
     functionName: "buy",
     args: [0n, deadline],
-    value: valid ? BigInt(Math.round(amount * 1e18)) : 0n,
+    value: validBuy ? BigInt(Math.round(ethAmount * 1e18)) : 0n,
     account: address,
-    query: { enabled: valid && side === "buy" },
+    query: { enabled: validBuy && side === "buy" },
   });
 
   const sellSim = useSimulateContract({
     address: marketAddress,
     abi: bondingCurveClogAbi,
     functionName: "sell",
-    args: [valid ? BigInt(Math.round(amount * 1e18)) : 0n, 0n, deadline],
+    args: [sellAmountWei ?? 0n, 0n, deadline],
     account: address,
-    query: { enabled: valid && side === "sell" },
+    query: { enabled: validSell && side === "sell" },
   });
 
   if (side === "buy") {
@@ -72,19 +87,56 @@ function useTradeQuote(marketAddress: `0x${string}`, side: "buy" | "sell", amoun
 }
 
 export function TradeWidget({ token }: { token: TokenDetail }) {
-  const { isConnected } = useAccount();
+  const { address, isConnected } = useAccount();
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const buy = useBuyToken();
   const sell = useSellToken();
+  const approve = useApproveToken();
   const active = side === "buy" ? buy : sell;
 
   const numericAmount = parseFloat(amount) || 0;
-  const quote = useTradeQuote(token.marketAddress, side, numericAmount);
+
+  // Parsed with viem's parseUnits directly from the raw string input -
+  // never through `Number(amount) * 1e18`, which cannot represent large
+  // 18-decimal token amounts exactly (a real wallet balance like
+  // 198978.001876459213675822 HOOD has 24 significant digits; a JS number
+  // only holds about 15-17 reliably). The string is kept as-is right up
+  // until this exact conversion. null for empty/invalid/partial input
+  // (e.g. "12.") - treated as not-yet-a-valid-amount, not an error.
+  let sellAmountWei: bigint | null = null;
+  if (side === "sell" && amount.trim() !== "") {
+    try {
+      sellAmountWei = parseUnits(amount, 18);
+    } catch {
+      sellAmountWei = null;
+    }
+  }
+
+  // BondingCurveClog.sell() calls token.transferFrom(msg.sender,
+  // address(this), tokenAmount) internally - the market must be an
+  // approved spender first. Only checked/queried on the sell side.
+  const allowance = useTokenAllowance(
+    side === "sell" ? token.tokenAddress : undefined,
+    address,
+    side === "sell" ? token.marketAddress : undefined
+  );
+  const allowanceKnown = allowance.allowance !== null;
+  const { checkingAllowance, hasEnoughAllowance, needsApproval } = computeSellApprovalState({
+    allowance: allowance.allowance,
+    sellAmountWei,
+  });
+
+  const quote = useTradeQuote(token.marketAddress, side, numericAmount, sellAmountWei, hasEnoughAllowance);
+
+  async function onApprove() {
+    if (!sellAmountWei) return;
+    await approve.execute(token.tokenAddress, token.marketAddress, sellAmountWei);
+  }
 
   async function onSubmit() {
     if (side === "buy") await buy.execute(token.marketAddress, numericAmount);
-    else await sell.execute(token.marketAddress, numericAmount);
+    else if (sellAmountWei !== null) await sell.execute(token.marketAddress, sellAmountWei);
   }
 
   if (active.status === "success") {
@@ -111,6 +163,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
           onClick={() => {
             buy.reset();
             sell.reset();
+            approve.reset();
             setAmount("");
           }}
         >
@@ -158,7 +211,11 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
       <div className="mt-3 flex justify-between text-xs text-ink-dim">
         <span>{side === "buy" ? `Expected ${token.ticker}` : "Expected ETH"}</span>
         <span className="font-mono tabular text-ink">
-          {numericAmount <= 0
+          {side === "sell" && (needsApproval || checkingAllowance)
+            ? needsApproval
+              ? "Approval required"
+              : "…"
+            : numericAmount <= 0
             ? "—"
             : quote.isLoading
             ? "…"
@@ -175,18 +232,39 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
       </div>
 
       {!isConnected && <p className="mt-3 text-xs text-ink-faint">Connect a wallet to trade.</p>}
+      {side === "sell" && approve.status === "success" && needsApproval && (
+        <p className="mt-3 text-xs text-cyan">Approval confirmed — updating…</p>
+      )}
+      {approve.error && <p className="mt-3 text-xs text-danger">{approve.error}</p>}
       {active.error && <p className="mt-3 text-xs text-danger">{active.error}</p>}
 
-      <Button
-        fullWidth
-        size="lg"
-        className="mt-4"
-        variant={side === "buy" ? "primary" : "danger"}
-        disabled={!isConnected || numericAmount <= 0 || active.status === "pending"}
-        onClick={onSubmit}
-      >
-        {active.status === "pending" ? "Confirm in wallet…" : `${side === "buy" ? "Buy" : "Sell"} ${token.ticker}`}
-      </Button>
+      {side === "sell" && needsApproval ? (
+        <Button
+          fullWidth
+          size="lg"
+          className="mt-4"
+          variant="secondary"
+          disabled={!isConnected || sellAmountWei === null || sellAmountWei <= 0n || approve.status === "pending"}
+          onClick={onApprove}
+        >
+          {approve.status === "pending" ? "Confirm in wallet…" : `Approve ${token.ticker}`}
+        </Button>
+      ) : (
+        <Button
+          fullWidth
+          size="lg"
+          className="mt-4"
+          variant={side === "buy" ? "primary" : "danger"}
+          disabled={
+            !isConnected ||
+            active.status === "pending" ||
+            (side === "buy" ? numericAmount <= 0 : sellAmountWei === null || sellAmountWei <= 0n || checkingAllowance)
+          }
+          onClick={onSubmit}
+        >
+          {active.status === "pending" ? "Confirm in wallet…" : `${side === "buy" ? "Buy" : "Sell"} ${token.ticker}`}
+        </Button>
+      )}
     </div>
   );
 }
