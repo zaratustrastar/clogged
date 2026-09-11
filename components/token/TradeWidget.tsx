@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAccount, useSimulateContract } from "wagmi";
 import { Button } from "@/components/ui/Button";
 import { useBuyToken, useSellToken } from "@/lib/hooks/useProtocolActions";
@@ -17,7 +17,25 @@ import clsx from "clsx";
  * produce if submitted right now. */
 function useTradeQuote(marketAddress: `0x${string}`, side: "buy" | "sell", amount: number) {
   const { address } = useAccount();
-  const deadline = useMemo(() => BigInt(Math.floor(Date.now() / 1000) + 600), []);
+
+  // Refreshed periodically rather than frozen at mount: a token page left
+  // open for a long time must never simulate against a deadline computed
+  // when the component first mounted, which could eventually be more than
+  // 10 minutes in the past. This is a read-only quote (never the actual
+  // transaction - see useBuyToken/useSellToken for that, which derive
+  // their own deadline fresh from the chain's latest block at submit
+  // time), so refreshing once a minute is more than sufficient headroom
+  // against the contract's 600-second window. No useMemo needed - this
+  // computation is trivially cheap, and re-running it on every render
+  // (whether triggered by the interval below or by the amount input
+  // changing) costs nothing extra.
+  const [, forceMinuteTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceMinuteTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+
   const valid = amount > 0 && Boolean(address);
 
   const buySim = useSimulateContract({

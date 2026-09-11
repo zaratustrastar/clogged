@@ -7,7 +7,8 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
-import { encodeAbiParameters, keccak256, type Address } from "viem";
+import { useQueryClient } from "@tanstack/react-query";
+import { encodeAbiParameters, keccak256, decodeEventLog, BaseError, ContractFunctionRevertedError, type Address, type Log } from "viem";
 import { addresses } from "@/lib/web3/addresses";
 import { isProtocolConfigured } from "@/lib/web3/env";
 import { tickerRegistryAbi } from "@/lib/web3/abis/tickerRegistry";
@@ -23,6 +24,24 @@ import type { TickerAvailability } from "@/lib/types";
 // message rather than a raw Solidity revert blob.
 // ---------------------------------------------------------------------------
 export function translateContractError(err: unknown): string {
+  // Prefer viem's own structured revert reason when available - the exact,
+  // clean string the contract actually reverted with (e.g. "expired"),
+  // never the surrounding diagnostic text (function signature, ABI
+  // parameter names, args) that matching the raw error message text below
+  // risks false-triggering on. This specifically fixes a real
+  // misclassification: buy/sell's ABI signature is
+  // buy(uint256 minTotalTokensOut, uint256 deadline) - viem's own
+  // diagnostic output mentions "deadline" for EVERY call to buy/sell,
+  // regardless of what actually reverted, so matching that word alone is
+  // not evidence of an actual expiry. BondingCurveClog's real expiry
+  // revert reason is the bare string "expired" - checked directly here.
+  if (err instanceof BaseError) {
+    const revertError = err.walk((e) => e instanceof ContractFunctionRevertedError);
+    if (revertError instanceof ContractFunctionRevertedError && revertError.reason === "expired") {
+      return "Transaction took too long and expired — try again.";
+    }
+  }
+
   const raw = err instanceof Error ? err.message : String(err);
 
   if (/User rejected|user rejected|ACTION_REJECTED/i.test(raw)) return "Transaction rejected in wallet.";
@@ -38,7 +57,6 @@ export function translateContractError(err: unknown): string {
   if (/TickerRegistry: public ticker cap reached/.test(raw)) return "All 7,777 tickers have been claimed.";
   if (/exceeds available token inventory|exceeds.*inventory/i.test(raw)) return "That amount is too large for the current curve depth — try a smaller amount.";
   if (/insufficient.*balance|ERC20.*balance/i.test(raw)) return "Insufficient token balance for this trade.";
-  if (/deadline/i.test(raw)) return "Transaction took too long and expired — try again.";
   if (/slippage|minTotalTokensOut|minEthOut/i.test(raw)) return "Price moved more than expected — try again.";
 
   // Fall back to the first line of the revert reason if one is present,
@@ -52,6 +70,7 @@ export type TxStatus = "idle" | "pending" | "success" | "error";
 function useContractWrite() {
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
+  const queryClient = useQueryClient();
   const [status, setStatus] = useState<TxStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
@@ -68,6 +87,15 @@ function useContractWrite() {
           await publicClient.waitForTransactionReceipt({ hash });
         }
         setStatus("success");
+        // A confirmed transaction (buy/sell/qualify/claim/launch) can
+        // change real onchain state these queries cache - reserve,
+        // balance, price, progress, qualification. Invalidate broadly so
+        // the UI reflects it promptly rather than waiting out each
+        // query's own scheduled refetch interval.
+        queryClient.invalidateQueries({ queryKey: ["clog-token-discovery"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-token-detail"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-held-tokens"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-round-status"] });
         return hash;
       } catch (e) {
         setStatus("error");
@@ -75,7 +103,7 @@ function useContractWrite() {
         throw e;
       }
     },
-    [publicClient]
+    [publicClient, queryClient]
   );
 
   const reset = useCallback(() => {
@@ -142,6 +170,29 @@ export function useTickerAvailability(ticker: string): TickerAvailability {
   return result;
 }
 
+/** Parses the real, authoritative launched tokenId from a TickerRegistry
+ * reveal transaction's receipt. Extracted as a standalone, pure function
+ * (no wagmi/react hooks involved) specifically so this logic - the
+ * source of truth useLaunchToken's reveal() returns directly to its
+ * caller, rather than relying on react state a caller's own closure might
+ * read before it has actually updated - is directly testable. Returns
+ * null if the Launched event isn't found/decodable, which should never
+ * happen for a genuinely successful reveal. */
+export function parseLaunchedTokenIdFromReceipt(logs: readonly Log[], registryAddress: string): number | null {
+  for (const l of logs) {
+    if (l.address.toLowerCase() !== registryAddress.toLowerCase()) continue;
+    try {
+      const decoded = decodeEventLog({ abi: tickerRegistryAbi, data: l.data, topics: l.topics });
+      if (decoded.eventName === "Launched") {
+        return Number((decoded.args as { tokenId: bigint }).tokenId);
+      }
+    } catch {
+      /* not this log */
+    }
+  }
+  return null;
+}
+
 export type LaunchPhase =
   | "idle"
   | "committing" // wallet tx 1 in flight
@@ -163,6 +214,7 @@ export function useLaunchToken() {
   const { address } = useAccount();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+  const queryClient = useQueryClient();
   const [phase, setPhase] = useState<LaunchPhase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [tokenId, setTokenId] = useState<number | null>(null);
@@ -230,8 +282,8 @@ export function useLaunchToken() {
     [address, publicClient, writeContractAsync]
   );
 
-  const reveal = useCallback(async () => {
-    if (!publicClient || !addresses.tickerRegistry || !pending.current) return;
+  const reveal = useCallback(async (): Promise<{ tokenId: number; txHash: `0x${string}` } | null> => {
+    if (!publicClient || !addresses.tickerRegistry || !pending.current) return null;
     const registry = addresses.tickerRegistry;
     try {
       setPhase("revealing");
@@ -244,27 +296,43 @@ export function useLaunchToken() {
       });
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
-      // Parse the Launched event directly for the real tokenId.
-      const { decodeEventLog } = await import("viem");
-      for (const l of receipt.logs) {
-        if (l.address.toLowerCase() !== registry.toLowerCase()) continue;
-        try {
-          const decoded = decodeEventLog({ abi: tickerRegistryAbi, data: l.data, topics: l.topics });
-          if (decoded.eventName === "Launched") {
-            setTokenId(Number((decoded.args as { tokenId: bigint }).tokenId));
-            break;
-          }
-        } catch {
-          /* not this log */
-        }
+      // Parse the Launched event directly for the real tokenId. This is
+      // the single authoritative source - callers must use the value
+      // RETURNED from this function directly, not react state read via a
+      // closure captured before this call resolved (setTokenId below
+      // updates state for rendering the success screen on a LATER render;
+      // it is not synchronously visible to code that continues executing
+      // immediately after this same await).
+      const launchedTokenId = parseLaunchedTokenIdFromReceipt(receipt.logs, registry);
+
+      if (launchedTokenId === null) {
+        // The transaction succeeded onchain, but the Launched event wasn't
+        // found/decoded - this should never happen for a genuine success.
+        // Surfacing it as an error is safer than returning a fabricated id.
+        setError("Launch transaction succeeded, but the launched tokenId could not be determined. Check your dashboard.");
+        setPhase("error");
+        return null;
       }
 
+      setTokenId(launchedTokenId);
       setPhase("live");
+
+      // The discovery cache (staleTime 15s / refetchInterval 20s) has no
+      // way to know this token exists until it actually refetches - a
+      // just-launched ticker is real onchain immediately, so a stale
+      // discovery snapshot must never be treated as proof it doesn't
+      // exist. Invalidating here means the very next component that reads
+      // discovery (e.g. the token detail page reached via "View token")
+      // refetches promptly instead of waiting out the scheduled interval.
+      queryClient.invalidateQueries({ queryKey: ["clog-token-discovery"] });
+
+      return { tokenId: launchedTokenId, txHash: hash };
     } catch (e) {
       setError(translateContractError(e));
       setPhase("error");
+      return null;
     }
-  }, [publicClient, writeContractAsync]);
+  }, [publicClient, writeContractAsync, queryClient]);
 
   const reset = useCallback(() => {
     setPhase("idle");
@@ -283,6 +351,7 @@ export function useLaunchToken() {
  * exists), then submits with a 1% slippage floor computed from that
  * simulated value. */
 export function useBuyToken() {
+  const { address } = useAccount();
   const { run, status, error, txHash, reset } = useContractWrite();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
@@ -291,15 +360,28 @@ export function useBuyToken() {
     async (marketAddress: Address, ethAmount: number) => {
       if (!publicClient) throw new Error("no client");
       const value = BigInt(Math.round(ethAmount * 1e18));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
 
       await run(async () => {
+        // Derived from the chain's own latest block timestamp, not the
+        // browser's Date.now() - immune to any local clock skew, and
+        // computed fresh for this specific attempt rather than reused from
+        // an earlier render, so a page left open for a long time can never
+        // simulate or submit against an already-stale deadline.
+        const latestBlock = await publicClient.getBlock();
+        const deadline = latestBlock.timestamp + 600n;
+
         const { result: expectedOut } = await publicClient.simulateContract({
           address: marketAddress,
           abi: bondingCurveClogAbi,
           functionName: "buy",
           args: [0n, deadline],
           value,
+          // Must match the real wallet transaction's own sender.
+          // BondingCurveClog.buy() ultimately transfers purchased tokens to
+          // msg.sender, and the quote simulation in TradeWidget already
+          // passes the connected account - this simulation must model the
+          // same caller as both of those, not an unspecified/default one.
+          account: address,
         });
         const minOut = (expectedOut * 99n) / 100n;
         return writeContractAsync({
@@ -311,7 +393,7 @@ export function useBuyToken() {
         });
       });
     },
-    [publicClient, run, writeContractAsync]
+    [address, publicClient, run, writeContractAsync]
   );
 
   return { execute, status, error, txHash, reset };
@@ -320,6 +402,7 @@ export function useBuyToken() {
 /** Real BondingCurveClog.sell(tokenAmount, minEthOut, deadline), same
  * simulate-then-write pattern as buy. */
 export function useSellToken() {
+  const { address } = useAccount();
   const { run, status, error, txHash, reset } = useContractWrite();
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
@@ -328,14 +411,17 @@ export function useSellToken() {
     async (marketAddress: Address, tokenAmount: number) => {
       if (!publicClient) throw new Error("no client");
       const amountWei = BigInt(Math.round(tokenAmount * 1e18));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
 
       await run(async () => {
+        const latestBlock = await publicClient.getBlock();
+        const deadline = latestBlock.timestamp + 600n;
+
         const { result } = await publicClient.simulateContract({
           address: marketAddress,
           abi: bondingCurveClogAbi,
           functionName: "sell",
           args: [amountWei, 0n, deadline],
+          account: address,
         });
         const [expectedOut] = result;
         const minOut = (expectedOut * 99n) / 100n;
@@ -347,7 +433,7 @@ export function useSellToken() {
         });
       });
     },
-    [publicClient, run, writeContractAsync]
+    [address, publicClient, run, writeContractAsync]
   );
 
   return { execute, status, error, txHash, reset };

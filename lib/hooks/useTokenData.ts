@@ -44,10 +44,31 @@ export function useTrendingTokens(limit = 4): AsyncState<TokenSummary[]> {
   return { data: sorted ?? null, isLoading: q.isLoading, error: q.error ? String(q.error) : null };
 }
 
+/** Whether a ticker missing from the current discovery snapshot should be
+ * treated as "still resolving existence" rather than "confirmed not
+ * found". A snapshot miss is never authoritative proof a ticker doesn't
+ * exist onchain - the snapshot itself can simply be stale (most
+ * importantly: immediately after a fresh launch, before discovery's own
+ * refetch has completed). Extracted as a pure function specifically so
+ * this decision is directly testable without mocking react-query/wagmi. */
+export function isStillResolvingTokenExistence(params: {
+  foundInSnapshot: boolean;
+  discoveryIsLoading: boolean;
+  discoveryIsFetching: boolean;
+}): boolean {
+  return !params.foundInSnapshot && (params.discoveryIsLoading || params.discoveryIsFetching);
+}
+
 export function useTokenDetail(ticker: string): AsyncState<TokenDetail> {
   const discovery = useTokenDiscovery();
   const publicClient = usePublicClient();
   const base = discovery.data?.find((t) => t.ticker.toUpperCase() === ticker.toUpperCase());
+
+  const stillResolvingExistence = isStillResolvingTokenExistence({
+    foundInSnapshot: Boolean(base),
+    discoveryIsLoading: discovery.isLoading,
+    discoveryIsFetching: discovery.isFetching,
+  });
 
   const detailQuery = useQuery({
     queryKey: ["clog-token-detail", base?.tokenId],
@@ -81,7 +102,8 @@ export function useTokenDetail(ticker: string): AsyncState<TokenDetail> {
     },
   });
 
-  return toAsyncState(detailQuery);
+  const state = toAsyncState(detailQuery);
+  return { ...state, isLoading: state.isLoading || stillResolvingExistence };
 }
 
 export function useRoundStatus(): AsyncState<RoundStatus> {

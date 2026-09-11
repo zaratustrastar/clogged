@@ -106,17 +106,17 @@ export default function LaunchPage() {
   }
 
   async function onCreateToken() {
-    await reveal();
-    if (tokenId !== null) {
-      const result = await tokenProfileStore.set({
-        tokenId,
+    const result = await reveal();
+    if (result) {
+      const profileResult = await tokenProfileStore.set({
+        tokenId: result.tokenId,
         displayName: name || undefined,
         imageUrl: uploadedImageUrl ?? undefined,
         xUrl: xUrl || undefined,
         telegramUrl: telegramUrl || undefined,
         websiteUrl: websiteUrl || undefined,
       });
-      setProfilePersisted(result.persisted);
+      setProfilePersisted(profileResult.persisted);
     }
   }
 
