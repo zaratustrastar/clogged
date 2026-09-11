@@ -24,6 +24,31 @@ describe("app/api/health route", () => {
     expect(typeof data.timestamp).toBe("string");
   });
 
+  it("is explicitly marked dynamic and never cacheable, so it always reflects the live server rather than a frozen build-time snapshot", async () => {
+    vi.resetModules();
+    delete process.env.DATABASE_URL;
+    const routeModule = await import("@/app/api/health/route");
+    expect(routeModule.dynamic).toBe("force-dynamic");
+
+    const res = await routeModule.GET();
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("the timestamp genuinely reflects the moment of the request, not a frozen build-time value", async () => {
+    vi.resetModules();
+    delete process.env.DATABASE_URL;
+    const { GET } = await import("@/app/api/health/route");
+
+    const before = Date.now();
+    const res = await GET();
+    const data = await res.json();
+    const after = Date.now();
+
+    const timestampMs = new Date(data.timestamp).getTime();
+    expect(timestampMs).toBeGreaterThanOrEqual(before);
+    expect(timestampMs).toBeLessThanOrEqual(after);
+  });
+
   it("reports database: connected against a real reachable database", async () => {
     vi.resetModules();
     process.env.DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/clog_test";
