@@ -41,7 +41,7 @@ export const env = {
   rewardVault: process.env.NEXT_PUBLIC_REWARD_VAULT_ADDRESS || undefined,
 
   // v4 trading path - see docs/V4_TRADING.md. All five must be present for the v4 path to be
-  // usable; isV4TradingConfigured below is the single place that decides this, so pages/hooks
+  // usable; v4TradingMode below is the single place that decides this, so pages/hooks
   // never have to re-derive that combined check themselves.
   v4TradingEnabledFlag: process.env.NEXT_PUBLIC_V4_TRADING_ENABLED || undefined,
   v4PoolManager: process.env.NEXT_PUBLIC_V4_POOL_MANAGER_ADDRESS || undefined,
@@ -69,18 +69,25 @@ export const isProtocolConfigured = Boolean(
  * silently failing when clicked. */
 export const isWalletConfigured = Boolean(env.reownProjectId);
 
-/** True only when NEXT_PUBLIC_V4_TRADING_ENABLED="true" AND every address the v4 path needs is
- * actually present. Deliberately conjunctive rather than trusting the flag alone: a canary
- * rollout that flips the flag on before every address is wired should fail closed to the
- * existing, proven direct BondingCurveClog path - never attempt a v4 trade with a missing
- * address. TradeWidget and the v4 trade hooks check this single flag, not the flag string and
- * the addresses separately. */
-export const isV4TradingConfigured = Boolean(
-  env.v4TradingEnabledFlag === "true" &&
-    env.v4PoolManager &&
-    env.universalRouter &&
-    env.permit2 &&
-    env.clogV4Hook
-);
+/** Which trading path is actually active - a real three-state decision, not
+ * a single boolean, because "flag on but misconfigured" must NEVER
+ * silently behave like "flag off": that would mean an operator explicitly
+ * turning v4 on gets direct trading with no indication anything is wrong.
+ * - "direct": the flag is off (or unset) - use the existing, unmodified
+ *   BondingCurveClog path exactly as before this feature existed.
+ * - "v4": the flag is "true" AND every required v4 address is present -
+ *   use the real Universal Router/PoolManager/ClogV4Hook path.
+ * - "misconfigured": the flag is "true" but at least one required address
+ *   is missing - trading must be DISABLED with an explicit configuration
+ *   error, never silently downgraded to either other path. */
+export type V4TradingMode = "direct" | "v4" | "misconfigured";
+
+export const v4TradingMode: V4TradingMode = (() => {
+  if (env.v4TradingEnabledFlag !== "true") return "direct";
+  const allV4AddressesPresent = Boolean(
+    env.v4PoolManager && env.universalRouter && env.permit2 && env.clogV4Hook
+  );
+  return allV4AddressesPresent ? "v4" : "misconfigured";
+})();
 
 export const deploymentBlockBigInt = env.deploymentBlock ? BigInt(env.deploymentBlock) : 0n;

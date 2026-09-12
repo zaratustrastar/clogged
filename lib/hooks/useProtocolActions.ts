@@ -605,7 +605,7 @@ export { useWaitForTransactionReceipt };
 // ============================================================================
 // v4 trading path: wallet -> real Robinhood Universal Router -> real deployed
 // PoolManager -> the universal ClogV4Hook -> canonical BondingCurveClog.
-// Active only when isV4TradingConfigured is true (see lib/web3/env.ts) - the
+// Active only when v4TradingMode === "v4" (see lib/web3/env.ts) - the
 // direct-path hooks above (useBuyToken/useSellToken) remain fully intact and
 // are what TradeWidget falls back to otherwise. See docs/V4_TRADING.md for
 // the full architecture note and the operator's own encoding-compatibility

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { useBuyToken, useSellToken, useTokenAllowance, useApproveToken, computeSellApprovalState, useBuyTokenV4, useSellTokenV4, useApproveTokenToPermit2, useApprovePermit2ForRouter, usePermit2AllowanceState, translateV4ContractError } from "@/lib/hooks/useProtocolActions";
 import { TRADE_TAX_PCT } from "@/lib/constants";
 import { bondingCurveClogAbi } from "@/lib/web3/abis/bondingCurveClog";
-import { env, isV4TradingConfigured } from "@/lib/web3/env";
+import { env, v4TradingMode } from "@/lib/web3/env";
 import type { TokenDetail } from "@/lib/types";
 import clsx from "clsx";
 
@@ -93,7 +93,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
 
   // v4 path: wallet -> real Robinhood Universal Router -> real deployed
   // PoolManager -> the universal ClogV4Hook -> canonical BondingCurveClog.
-  // Active only when isV4TradingConfigured (NEXT_PUBLIC_V4_TRADING_ENABLED
+  // Active only when v4TradingMode === "v4" (NEXT_PUBLIC_V4_TRADING_ENABLED
   // plus every required address actually present - see lib/web3/env.ts).
   // The direct path below remains fully intact as the exact fallback when
   // the flag is off, unchanged from before this feature existed.
@@ -101,8 +101,8 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
   const directSell = useSellToken();
   const v4Buy = useBuyTokenV4();
   const v4Sell = useSellTokenV4();
-  const buy = isV4TradingConfigured ? v4Buy : directBuy;
-  const sell = isV4TradingConfigured ? v4Sell : directSell;
+  const buy = v4TradingMode === "v4" ? v4Buy : directBuy;
+  const sell = v4TradingMode === "v4" ? v4Sell : directSell;
   const approve = useApproveToken();
   const approveToPermit2 = useApproveTokenToPermit2();
   const approvePermit2ForRouter = useApprovePermit2ForRouter();
@@ -132,16 +132,16 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
   // router directly - approval goes through Permit2's own two-step
   // allowance (ERC20 -> Permit2, then Permit2 -> Universal Router).
   const directAllowance = useTokenAllowance(
-    side === "sell" && !isV4TradingConfigured ? token.tokenAddress : undefined,
+    side === "sell" && v4TradingMode !== "v4" ? token.tokenAddress : undefined,
     address,
-    side === "sell" && !isV4TradingConfigured ? token.marketAddress : undefined
+    side === "sell" && v4TradingMode !== "v4" ? token.marketAddress : undefined
   );
   const permit2Allowance = usePermit2AllowanceState(
-    side === "sell" && isV4TradingConfigured ? token.tokenAddress : undefined,
+    side === "sell" && v4TradingMode === "v4" ? token.tokenAddress : undefined,
     address
   );
 
-  const allowanceKnown = isV4TradingConfigured
+  const allowanceKnown = v4TradingMode === "v4"
     ? permit2Allowance.erc20ToPermit2Allowance !== null && permit2Allowance.permit2ToRouterAmount !== null
     : directAllowance.allowance !== null;
 
@@ -160,7 +160,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
     sellAmountWei !== null &&
     ((permit2Allowance.permit2ToRouterAmount ?? 0n) < sellAmountWei ||
       (permit2Allowance.permit2ToRouterExpiration ?? 0) * 1000 < Date.now());
-  const { checkingAllowance, hasEnoughAllowance, needsApproval } = isV4TradingConfigured
+  const { checkingAllowance, hasEnoughAllowance, needsApproval } = v4TradingMode === "v4"
     ? {
         checkingAllowance: sellAmountWei !== null && !allowanceKnown,
         hasEnoughAllowance: sellAmountWei !== null && !needsErc20ToPermit2 && !needsPermit2ToRouter,
@@ -172,7 +172,8 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
 
   async function onApprove() {
     if (!sellAmountWei) return;
-    if (isV4TradingConfigured) {
+    if (v4TradingMode === "misconfigured") return; // never silently fall back - see the render guard below
+    if (v4TradingMode === "v4") {
       // Two real, separate transactions - never combined into one, since
       // each is independently useful (the ERC20->Permit2 step is a
       // one-time, reusable-across-any-Permit2-protocol approval) and each
@@ -187,11 +188,18 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
   }
 
   async function onSubmit() {
+    // v4TradingMode === "misconfigured" means the operator explicitly
+    // enabled v4 trading (NEXT_PUBLIC_V4_TRADING_ENABLED=true) but at
+    // least one required address is missing - this must NEVER silently
+    // execute a direct BondingCurveClog trade instead. The submit button
+    // is already disabled in this state (see the render guard below); this
+    // is defense in depth against that ever being bypassed.
+    if (v4TradingMode === "misconfigured") return;
     if (side === "buy") {
-      if (isV4TradingConfigured) await v4Buy.execute(token.tokenAddress, numericAmount);
+      if (v4TradingMode === "v4") await v4Buy.execute(token.tokenAddress, numericAmount);
       else await directBuy.execute(token.marketAddress, numericAmount);
     } else if (sellAmountWei !== null) {
-      if (isV4TradingConfigured) await v4Sell.execute(token.tokenAddress, sellAmountWei);
+      if (v4TradingMode === "v4") await v4Sell.execute(token.tokenAddress, sellAmountWei);
       else await directSell.execute(token.marketAddress, sellAmountWei);
     }
   }
@@ -289,7 +297,14 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
       </div>
 
       {!isConnected && <p className="mt-3 text-xs text-ink-faint">Connect a wallet to trade.</p>}
-      {side === "sell" && isV4TradingConfigured && needsApproval && (
+      {v4TradingMode === "misconfigured" && (
+        <p className="mt-3 text-xs text-danger">
+          v4 trading is enabled but not fully configured (missing PoolManager, Universal Router, Permit2, or
+          ClogV4Hook address) — trading is disabled until this is fixed. This never falls back to direct
+          trading automatically.
+        </p>
+      )}
+      {side === "sell" && v4TradingMode === "v4" && needsApproval && (
         <p className="mt-2 text-xs text-ink-faint">
           {needsErc20ToPermit2
             ? "Step 1 of 2: approve this token to Permit2 (one-time, reusable for any Permit2 trade)."
@@ -314,7 +329,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
       )}
       {active.error && (
         <p className="mt-3 text-xs text-danger">
-          {isV4TradingConfigured ? "Trade failed: " : ""}
+          {v4TradingMode === "v4" ? "Trade failed: " : ""}
           {active.error}
         </p>
       )}
@@ -326,6 +341,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
           className="mt-4"
           variant="secondary"
           disabled={
+            v4TradingMode === "misconfigured" ||
             !isConnected ||
             sellAmountWei === null ||
             sellAmountWei <= 0n ||
@@ -335,7 +351,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
           }
           onClick={onApprove}
         >
-          {isV4TradingConfigured
+          {v4TradingMode === "v4"
             ? needsErc20ToPermit2
               ? approveToPermit2.status === "pending"
                 ? "Confirm in wallet…"
@@ -354,6 +370,7 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
           className="mt-4"
           variant={side === "buy" ? "primary" : "danger"}
           disabled={
+            v4TradingMode === "misconfigured" ||
             !isConnected ||
             active.status === "pending" ||
             (side === "buy" ? numericAmount <= 0 : sellAmountWei === null || sellAmountWei <= 0n || checkingAllowance)
