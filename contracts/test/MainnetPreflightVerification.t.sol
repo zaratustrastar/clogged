@@ -7,6 +7,37 @@ import {MockCCIPRouter} from "@chainlink/contracts-ccip/contracts/test/mocks/Moc
 import {VRFCoordinatorV2_5Mock} from "@chainlink/contracts/src/v0.8/vrf/mocks/VRFCoordinatorV2_5Mock.sol";
 import {IRouterClient} from "@chainlink/contracts-ccip/contracts/interfaces/IRouterClient.sol";
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
+import {ChainlinkRandomnessProvider} from "../src/ChainlinkRandomnessProvider.sol";
+
+/// @notice Captures the exact `data` bytes passed to getFee(), so a test can directly compare
+///         what MainnetPreflight's own "representative" quote message sends against what the
+///         real ChainlinkRandomnessProvider/VRFWrapperOnArbitrum actually send - the only way to
+///         provably catch the two silently diverging again, rather than merely re-asserting a
+///         hardcoded expectation that could itself drift from the real contracts unnoticed.
+contract CapturingCCIPRouter is IRouterClient {
+    bytes public lastCapturedData;
+    uint256 public callCount;
+
+    function isChainSupported(uint64) external pure returns (bool) {
+        return true;
+    }
+
+    function getFee(uint64, Client.EVM2AnyMessage memory) external pure returns (uint256) {
+        // Cannot capture here: IRouterClient declares getFee `view`, so Solidity enforces this
+        // override cannot be less restrictive (confirmed directly: compiling a non-view override
+        // is a hard error, "Overriding function changes state mutability from view to
+        // nonpayable") - the real EVM-level STATICCALL this produces would reject any state
+        // write attempted inside anyway. Capture happens in ccipSend below instead, which carries
+        // no such restriction and is what requestRandomness's real, actual send goes through.
+        return 1;
+    }
+
+    function ccipSend(uint64, Client.EVM2AnyMessage calldata message) external payable returns (bytes32) {
+        lastCapturedData = message.data;
+        callCount++;
+        return keccak256(message.data);
+    }
+}
 
 /// @notice The mock CCIP router's isChainSupported() always returns true (a hardcoded stub, not a
 ///         real configurable check) - this stands in for a router that does NOT support a given
@@ -15,9 +46,11 @@ contract UnsupportedSelectorRouter is IRouterClient {
     function isChainSupported(uint64) external pure returns (bool) {
         return false;
     }
+
     function getFee(uint64, Client.EVM2AnyMessage memory) external pure returns (uint256) {
         return 0;
     }
+
     function ccipSend(uint64, Client.EVM2AnyMessage calldata) external payable returns (bytes32) {
         revert("not implemented");
     }
@@ -29,6 +62,74 @@ contract UnsupportedSelectorRouter is IRouterClient {
 ///         and real mock contracts at whatever address they naturally deploy to (env vars point at
 ///         the mocks, not the real operator-supplied addresses, since this is testing the SCRIPT's
 ///         logic, not the real operator config itself).
+/// @notice Proves ChainlinkRandomnessProvider.requestRandomness() really sends
+///         `data: abi.encode(requestId)` (a single uint256) - captured via ccipSend (not getFee,
+///         which IRouterClient declares `view`, forcing a STATICCALL that would reject any state
+///         write a capturing mock's getFee() attempted) - and that MainnetPreflight.s.sol's own
+///         Robinhood-side representative quote uses the identical shape, via a direct source-text
+///         assertion. Together these two checks are what actually prevent the two from silently
+///         diverging again: this test alone would not have caught the original bug (the quote
+///         used a two-value payload while the real message is single-value) without both halves.
+contract MainnetPreflightMessageShapeTest is Test {
+    function test_requestRandomness_reallySendsASingleUint256_notAPair() public {
+        CapturingCCIPRouter capturingRouter = new CapturingCCIPRouter();
+        ChainlinkRandomnessProvider provider = new ChainlinkRandomnessProvider(
+            address(capturingRouter), uint64(4949039107694359620), makeAddr("governance"), address(this)
+        );
+        // The test contract itself is round manager - onlyRoundManager then accepts calls made
+        // directly from here, with no prank needed.
+        provider.setRoundManager(address(this));
+        vm.deal(address(provider), 10 ether);
+        vm.prank(makeAddr("governance"));
+        provider.setWrapper(makeAddr("wrapperPlaceholder"));
+
+        provider.requestRandomness(1);
+
+        assertEq(capturingRouter.callCount(), 1, "ccipSend must have been called exactly once");
+        assertEq(
+            capturingRouter.lastCapturedData(),
+            abi.encode(uint256(1)),
+            "requestRandomness must send exactly abi.encode(requestId) - a single uint256, never a pair"
+        );
+    }
+
+    function test_mainnetPreflight_robinhoodQuote_usesTheSameSingleUint256Shape() public {
+        string memory source = vm.readFile("script/MainnetPreflight.s.sol");
+        assertTrue(
+            _contains(source, "data: abi.encode(uint256(1)),"),
+            "MainnetPreflight's Robinhood-side representative quote must use abi.encode(uint256(1)) - a single value, matching requestRandomness's real data: abi.encode(requestId)"
+        );
+        // The return-leg (Arbitrum -> Robinhood) quote is correctly a PAIR
+        // (originalRequestId, randomWord) - matching relayRandomness's own real message shape -
+        // and must stay that way; asserted here so a future edit that "fixes" this one too
+        // (mistakenly matching it to the outbound shape) is itself caught.
+        assertTrue(
+            _contains(
+                source,
+                "data: abi.encode(uint256(1), uint256(1)), // representative payload: (originalRequestId, randomWord)"
+            ),
+            "MainnetPreflight's Arbitrum-side (return leg) representative quote must remain a pair - matching relayRandomness's real data: abi.encode(originalRequestId, randomWord)"
+        );
+    }
+
+    function _contains(string memory haystack, string memory needle) internal pure returns (bool) {
+        bytes memory h = bytes(haystack);
+        bytes memory n = bytes(needle);
+        if (n.length > h.length) return false;
+        for (uint256 i = 0; i <= h.length - n.length; i++) {
+            bool matchFound = true;
+            for (uint256 j = 0; j < n.length; j++) {
+                if (h[i + j] != n[j]) {
+                    matchFound = false;
+                    break;
+                }
+            }
+            if (matchFound) return true;
+        }
+        return false;
+    }
+}
+
 contract MainnetPreflightVerificationTest is Test {
     MainnetPreflight preflight;
 
@@ -152,7 +253,9 @@ contract MainnetPreflightVerificationTest is Test {
         // subscription check this test actually means to exercise.
         vm.setEnv("DEPLOYER_ADDRESS", vm.toString(address(0)));
 
-        vm.expectRevert(bytes("FAIL: getSubscription() reverted - this subscription ID likely does not exist on this coordinator"));
+        vm.expectRevert(
+            bytes("FAIL: getSubscription() reverted - this subscription ID likely does not exist on this coordinator")
+        );
         preflight.run();
     }
 

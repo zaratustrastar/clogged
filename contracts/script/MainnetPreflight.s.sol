@@ -36,7 +36,9 @@ contract MainnetPreflight is Script {
         } else if (block.chainid == ARBITRUM_CHAIN_ID) {
             _runArbitrumChecks();
         } else {
-            revert("MainnetPreflight: unrecognized chain id - check --rpc-url points at Robinhood Chain Mainnet (4663) or Arbitrum One (42161)");
+            revert(
+                "MainnetPreflight: unrecognized chain id - check --rpc-url points at Robinhood Chain Mainnet (4663) or Arbitrum One (42161)"
+            );
         }
     }
 
@@ -56,14 +58,18 @@ contract MainnetPreflight is Script {
         require(supported, "FAIL: Robinhood router does not report the Arbitrum selector as supported");
 
         // Representative getFee() - the exact message shape
-        // ChainlinkRandomnessProvider.requestRandomness actually builds (see its own source), so
-        // this is a real quote for the real message this system will actually send, not a guess.
+        // ChainlinkRandomnessProvider.requestRandomness actually builds (see its own source:
+        // `data: abi.encode(requestId)` - a single uint256, confirmed directly against the real
+        // contract, not assumed), so this is a real quote for the real message this system will
+        // actually send, not a guess.
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
             receiver: abi.encode(address(0xdEaD)), // placeholder destination - fee depends on message shape, not the specific address
-            data: abi.encode(uint256(1), uint256(1)), // representative payload size: (requestId, roundId)
+            data: abi.encode(uint256(1)), // representative payload: requestId alone, matching requestRandomness's real data: abi.encode(requestId)
             tokenAmounts: new Client.EVMTokenAmount[](0),
             feeToken: address(0),
-            extraArgs: Client._argsToBytes(Client.GenericExtraArgsV2({gasLimit: 300_000, allowOutOfOrderExecution: true}))
+            extraArgs: Client._argsToBytes(
+                Client.GenericExtraArgsV2({gasLimit: 300_000, allowOutOfOrderExecution: true})
+            )
         });
         try IRouterClient(router).getFee(arbitrumSelector, message) returns (uint256 fee) {
             console2.log("  representative getFee() (wei):", fee);
@@ -119,7 +125,9 @@ contract MainnetPreflight is Script {
             data: abi.encode(uint256(1), uint256(1)), // representative payload: (originalRequestId, randomWord)
             tokenAmounts: new Client.EVMTokenAmount[](0),
             feeToken: address(0),
-            extraArgs: Client._argsToBytes(Client.GenericExtraArgsV2({gasLimit: 300_000, allowOutOfOrderExecution: true}))
+            extraArgs: Client._argsToBytes(
+                Client.GenericExtraArgsV2({gasLimit: 300_000, allowOutOfOrderExecution: true})
+            )
         });
         try IRouterClient(router).getFee(robinhoodSelector, message) returns (uint256 fee) {
             console2.log("  representative getFee() (wei):", fee);
@@ -132,7 +140,9 @@ contract MainnetPreflight is Script {
             console2.log("ARBITRUM_GOVERNANCE_ADDRESS:", arbitrumGovernance);
             console2.log("  bytecode length:", arbitrumGovernance.code.length);
             if (arbitrumGovernance.code.length == 0) {
-                console2.log("  NOTE: no code here - only a problem if this is meant to be a Safe/contract; fine if it's a plain EOA");
+                console2.log(
+                    "  NOTE: no code here - only a problem if this is meant to be a Safe/contract; fine if it's a plain EOA"
+                );
             }
         } else {
             console2.log("ARBITRUM_GOVERNANCE_ADDRESS not supplied - skipped");
@@ -160,7 +170,9 @@ contract MainnetPreflight is Script {
                 console2.log("  current consumer count:", consumers.length);
                 require(owner != address(0), "FAIL: subscription reports a zero owner - it may not actually exist");
             } catch {
-                revert("FAIL: getSubscription() reverted - this subscription ID likely does not exist on this coordinator");
+                revert(
+                    "FAIL: getSubscription() reverted - this subscription ID likely does not exist on this coordinator"
+                );
             }
         } else {
             console2.log("VRF_SUBSCRIPTION_ID not supplied yet - skipped (expected before you've created it)");
