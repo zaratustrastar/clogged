@@ -1,0 +1,11 @@
+{
+  "lib/universal-router": {
+    "tag": {
+      "name": "2.2.0",
+      "rev": "020e1b786ad9a6bad924874752167934734ad1e1"
+    }
+  },
+  "lib/v4-periphery": {
+    "rev": "dce236d4e2057422d0791d9a973a58765eb46f65"
+  }
+}
