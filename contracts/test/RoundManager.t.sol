@@ -19,13 +19,16 @@ contract RoundManagerTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
     }
 
-    function _makeToken(uint256 reserveWei, uint256 progressBps) internal returns (uint256 tokenId, MockReserveMarket m) {
+    function _makeToken(uint256 reserveWei, uint256 progressBps)
+        internal
+        returns (uint256 tokenId, MockReserveMarket m)
+    {
         m = new MockReserveMarket();
         m.setReserve(reserveWei);
         m.setProgressBps(progressBps);
@@ -38,7 +41,7 @@ contract RoundManagerTest is Test {
             ms[i].setReserve(1 ether);
             engine.onTrade(ids[i]);
         }
-        vm.warp(openT + rm.ROUND_DURATION());
+        vm.warp(openT + rm.roundDuration());
         // A confirming touch after the 30-minute mark is what locks in qualification (no more
         // retroactive finalization at close).
         for (uint256 i = 0; i < ids.length; i++) {
@@ -62,10 +65,14 @@ contract RoundManagerTest is Test {
         (uint256 idC, MockReserveMarket mC) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](3);
         MockReserveMarket[] memory ms = new MockReserveMarket[](3);
-        ids[0] = idA; ids[1] = idB; ids[2] = idC;
-        ms[0] = mA; ms[1] = mB; ms[2] = mC;
+        ids[0] = idA;
+        ids[1] = idB;
+        ids[2] = idC;
+        ms[0] = mA;
+        ms[1] = mB;
+        ms[2] = mC;
 
-        vm.warp(this._now() + rm.ROUND_DURATION());
+        vm.warp(this._now() + rm.roundDuration());
         rm.closeRoundAndOpenNext();
 
         // Qualifies all three DURING round 2, then closes round 2 -- no lag: round 2 draws from
@@ -76,7 +83,9 @@ contract RoundManagerTest is Test {
         assertEq(rm.getRound(2).candidateCount, 3, "round 2's OWN draw uses round 2's own candidates -- no lag");
         assertFalse(rm.getRound(2).drawSkipped);
         assertTrue(rm.getRound(2).randomnessRequested);
-        assertEq(rm.getRound(2).candidateRoundId, 2, "candidateRoundId must equal the closing round itself, not roundId - 1");
+        assertEq(
+            rm.getRound(2).candidateRoundId, 2, "candidateRoundId must equal the closing round itself, not roundId - 1"
+        );
     }
 
     function test_fullLifecycle_candidatesSettleTheSameRoundTheyQualifiedIn() public {
@@ -85,10 +94,14 @@ contract RoundManagerTest is Test {
         (uint256 idC, MockReserveMarket mC) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](3);
         MockReserveMarket[] memory ms = new MockReserveMarket[](3);
-        ids[0] = idA; ids[1] = idB; ids[2] = idC;
-        ms[0] = mA; ms[1] = mB; ms[2] = mC;
+        ids[0] = idA;
+        ids[1] = idB;
+        ids[2] = idC;
+        ms[0] = mA;
+        ms[1] = mB;
+        ms[2] = mC;
 
-        vm.warp(this._now() + rm.ROUND_DURATION());
+        vm.warp(this._now() + rm.roundDuration());
         rm.closeRoundAndOpenNext();
 
         // Qualifying all three and closing round 2 in one step must settle round 2 immediately --
@@ -114,8 +127,12 @@ contract RoundManagerTest is Test {
         (uint256 idC, MockReserveMarket mC) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](3);
         MockReserveMarket[] memory ms = new MockReserveMarket[](3);
-        ids[0] = idA; ids[1] = idB; ids[2] = idC;
-        ms[0] = mA; ms[1] = mB; ms[2] = mC;
+        ids[0] = idA;
+        ids[1] = idB;
+        ids[2] = idC;
+        ms[0] = mA;
+        ms[1] = mB;
+        ms[2] = mC;
 
         assertEq(rm.currentRoundId(), 1, "must genuinely be the first-ever round, never closed before");
         _qualifyAllAndCloseRound(ids, ms); // qualifies into round 1, then closes round 1
@@ -137,8 +154,12 @@ contract RoundManagerTest is Test {
         (uint256 idC, MockReserveMarket mC) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](3);
         MockReserveMarket[] memory ms = new MockReserveMarket[](3);
-        ids[0] = idA; ids[1] = idB; ids[2] = idC;
-        ms[0] = mA; ms[1] = mB; ms[2] = mC;
+        ids[0] = idA;
+        ids[1] = idB;
+        ids[2] = idC;
+        ms[0] = mA;
+        ms[1] = mB;
+        ms[2] = mC;
 
         _qualifyAllAndCloseRound(ids, ms);
         RoundManager.RoundInfo memory info = rm.getRound(1);
@@ -172,7 +193,8 @@ contract RoundManagerTest is Test {
         (uint256 idA, MockReserveMarket mA) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](1);
         MockReserveMarket[] memory ms = new MockReserveMarket[](1);
-        ids[0] = idA; ms[0] = mA;
+        ids[0] = idA;
+        ms[0] = mA;
 
         // Only 1 candidate qualifies into round 1 -- below MIN_DRAW_CANDIDATES(3).
         _qualifyAllAndCloseRound(ids, ms);
@@ -194,8 +216,12 @@ contract RoundManagerTest is Test {
         (uint256 idC, MockReserveMarket mC) = _makeToken(1 ether, 1000);
         ids = new uint256[](3);
         ms = new MockReserveMarket[](3);
-        ids[0] = idA; ids[1] = idB; ids[2] = idC;
-        ms[0] = mA; ms[1] = mB; ms[2] = mC;
+        ids[0] = idA;
+        ids[1] = idB;
+        ids[2] = idC;
+        ms[0] = mA;
+        ms[1] = mB;
+        ms[2] = mC;
     }
 
     /// @notice A: provider unavailable -- the round must still close, candidates still freeze, the
@@ -216,20 +242,26 @@ contract RoundManagerTest is Test {
         assertTrue(info.closed, "round must still close even though the provider reverted");
         assertEq(info.candidateCount, 3, "candidates must still be frozen/counted");
         assertFalse(info.randomnessRequested, "no successful request was made");
-        assertFalse(info.drawSkipped, "must not read as skipped -- it has enough candidates, it's just awaiting a successful request");
+        assertFalse(
+            info.drawSkipped,
+            "must not read as skipped -- it has enough candidates, it's just awaiting a successful request"
+        );
         assertFalse(info.settled, "no winner may ever be fabricated");
         assertEq(rm.currentRoundId(), 2, "the next round must have opened regardless");
     }
 
     /// @dev Same as `_qualifyAllAndCloseRound` but returns the closed round id, for tests that
     ///      want to assert on it directly.
-    function _qualifyAllAndCloseRoundReturning(uint256[] memory ids, MockReserveMarket[] memory ms) internal returns (uint256 closedRoundId) {
+    function _qualifyAllAndCloseRoundReturning(uint256[] memory ids, MockReserveMarket[] memory ms)
+        internal
+        returns (uint256 closedRoundId)
+    {
         uint256 openT = this._now();
         for (uint256 i = 0; i < ids.length; i++) {
             ms[i].setReserve(1 ether);
             engine.onTrade(ids[i]);
         }
-        vm.warp(openT + rm.ROUND_DURATION());
+        vm.warp(openT + rm.roundDuration());
         for (uint256 i = 0; i < ids.length; i++) {
             engine.qualify(ids[i]);
         }
@@ -284,7 +316,7 @@ contract RoundManagerTest is Test {
         // Cheaply advance to round 10 (matching the spec's own numbering), no candidates each
         // time so each trivially closes as a skipped draw.
         for (uint256 i = 1; i < 10; i++) {
-            vm.warp(rm.currentRoundOpenTime() + rm.ROUND_DURATION());
+            vm.warp(rm.currentRoundOpenTime() + rm.roundDuration());
             rm.closeRoundAndOpenNext();
         }
         assertEq(rm.currentRoundId(), 10);
@@ -297,18 +329,25 @@ contract RoundManagerTest is Test {
 
         // Round 11 opens and closes normally -- no candidates, just proving ordinary progression
         // -- while round 10 remains untouched and unsettled throughout.
-        vm.warp(rm.currentRoundOpenTime() + rm.ROUND_DURATION());
+        vm.warp(rm.currentRoundOpenTime() + rm.roundDuration());
         rm.closeRoundAndOpenNext();
-        assertEq(rm.currentRoundId(), 12, "round 12 must have opened -- two full rounds of progress since round 10 got stuck");
+        assertEq(
+            rm.currentRoundId(), 12, "round 12 must have opened -- two full rounds of progress since round 10 got stuck"
+        );
         assertTrue(rm.getRound(11).closed);
-        assertFalse(rm.getRound(10).settled, "round 10 must still be pending, completely unaffected by round 11's own progress");
+        assertFalse(
+            rm.getRound(10).settled, "round 10 must still be pending, completely unaffected by round 11's own progress"
+        );
 
         // Round 10 can still be independently recovered and settled at any later point.
         provider.setShouldRevert(false);
         rm.requestRandomnessForRound(10);
         assertTrue(rm.getRound(10).randomnessRequested);
         provider.fulfill(rm.getRound(10).randomnessRequestId, 424242);
-        assertTrue(rm.getRound(10).settled, "round 10 must still be independently settleable long after newer rounds have moved on");
+        assertTrue(
+            rm.getRound(10).settled,
+            "round 10 must still be independently settleable long after newer rounds have moved on"
+        );
     }
 
     /// @notice E: once round N closes, its candidate set and count are permanently frozen -- later
@@ -317,7 +356,8 @@ contract RoundManagerTest is Test {
         (uint256 idA, MockReserveMarket mA) = _makeToken(1 ether, 1000);
         uint256[] memory ids = new uint256[](1);
         MockReserveMarket[] memory ms = new MockReserveMarket[](1);
-        ids[0] = idA; ms[0] = mA;
+        ids[0] = idA;
+        ms[0] = mA;
         _qualifyAllAndCloseRoundReturning(ids, ms); // round 1 closes with exactly 1 (skipped) candidate
         uint256 frozenCount = rm.getRound(1).candidateCount;
         assertEq(frozenCount, 1);
@@ -326,11 +366,16 @@ contract RoundManagerTest is Test {
         (uint256 idB, MockReserveMarket mB) = _makeToken(1 ether, 1000);
         mB.setReserve(1 ether);
         engine.onTrade(idB);
-        vm.warp(block.timestamp + rm.ROUND_DURATION());
+        vm.warp(block.timestamp + rm.roundDuration());
         engine.qualify(idB);
 
-        assertEq(rm.getRound(1).candidateCount, frozenCount, "round 1's frozen candidateCount must never change after close");
-        assertFalse(engine.isCandidate(1, idB), "a token qualifying in round 2 must never retroactively appear in round 1's candidate set");
+        assertEq(
+            rm.getRound(1).candidateCount, frozenCount, "round 1's frozen candidateCount must never change after close"
+        );
+        assertFalse(
+            engine.isCandidate(1, idB),
+            "a token qualifying in round 2 must never retroactively appear in round 1's candidate set"
+        );
         assertTrue(engine.isCandidate(2, idB));
     }
 

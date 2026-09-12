@@ -8,7 +8,7 @@ import {
   useWaitForTransactionReceipt,
 } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { encodeAbiParameters, keccak256, decodeEventLog, BaseError, ContractFunctionRevertedError, type Address, type Log } from "viem";
+import { encodeAbiParameters, encodePacked, maxUint256, keccak256, decodeEventLog, BaseError, ContractFunctionRevertedError, type Address, type Log } from "viem";
 import { addresses } from "@/lib/web3/addresses";
 import { isProtocolConfigured } from "@/lib/web3/env";
 import { tickerRegistryAbi } from "@/lib/web3/abis/tickerRegistry";
@@ -16,6 +16,9 @@ import { bondingCurveClogAbi } from "@/lib/web3/abis/bondingCurveClog";
 import { memeTokenAbi } from "@/lib/web3/abis/memeToken";
 import { eligibilityRegistryAbi } from "@/lib/web3/abis/eligibilityRegistry";
 import { rewardVaultAbi } from "@/lib/web3/abis/rewardVault";
+import { clogV4HookAbi } from "@/lib/web3/abis/clogV4Hook";
+import { universalRouterAbi } from "@/lib/web3/abis/universalRouter";
+import { permit2Abi } from "@/lib/web3/abis/permit2";
 import { RESERVED_TICKER, MAX_TICKER_LENGTH, MIN_TICKER_LENGTH, LAUNCH_PRICE_ETH } from "@/lib/constants";
 import type { TickerAvailability } from "@/lib/types";
 
@@ -81,7 +84,7 @@ export function translateContractError(err: unknown): string {
 
 export type TxStatus = "idle" | "pending" | "success" | "error";
 
-function useContractWrite() {
+function useContractWrite(translateError: (err: unknown) => string = translateContractError) {
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const queryClient = useQueryClient();
@@ -111,14 +114,16 @@ function useContractWrite() {
         queryClient.invalidateQueries({ queryKey: ["clog-held-tokens"] });
         queryClient.invalidateQueries({ queryKey: ["clog-round-status"] });
         queryClient.invalidateQueries({ queryKey: ["clog-allowance"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-permit2-allowance"] });
+        queryClient.invalidateQueries({ queryKey: ["clog-permit2-router-allowance"] });
         return hash;
       } catch (e) {
         setStatus("error");
-        setError(translateContractError(e));
+        setError(translateError(e));
         throw e;
       }
     },
-    [publicClient, queryClient]
+    [publicClient, queryClient, translateError]
   );
 
   const reset = useCallback(() => {
@@ -596,3 +601,401 @@ export function useClaimReward() {
 // Re-export the receipt hook for components that want to render an explorer
 // link once a hash is known, without each one re-deriving the pattern.
 export { useWaitForTransactionReceipt };
+
+// ============================================================================
+// v4 trading path: wallet -> real Robinhood Universal Router -> real deployed
+// PoolManager -> the universal ClogV4Hook -> canonical BondingCurveClog.
+// Active only when isV4TradingConfigured is true (see lib/web3/env.ts) - the
+// direct-path hooks above (useBuyToken/useSellToken) remain fully intact and
+// are what TradeWidget falls back to otherwise. See docs/V4_TRADING.md for
+// the full architecture note and the operator's own encoding-compatibility
+// caveat.
+// ============================================================================
+
+const V4_ACTION_SETTLE = 0x0b;
+const V4_ACTION_SWAP_EXACT_IN_SINGLE = 0x06;
+const V4_ACTION_TAKE_ALL = 0x0f;
+const UNIVERSAL_ROUTER_COMMAND_V4_SWAP = 0x10;
+
+const POOL_KEY_ABI_TYPE = {
+  type: "tuple",
+  components: [
+    { name: "currency0", type: "address" },
+    { name: "currency1", type: "address" },
+    { name: "fee", type: "uint24" },
+    { name: "tickSpacing", type: "int24" },
+    { name: "hooks", type: "address" },
+  ],
+} as const;
+
+// The Robinhood-compatible ExactInputSingleParams encoding, including
+// minHopPriceX36 immediately before hookData - per the operator's own
+// confirmation (current Uniswap documentation/Trading API identifies the
+// Robinhood deployment as Universal Router v2.1.1) plus independently-found
+// third-party ecosystem documentation describing this exact field placement.
+// This has NOT been independently re-verified against deployed bytecode or
+// verified Blockscout source for the live router address - see
+// docs/V4_TRADING.md for the full caveat. If this encoding is wrong, the
+// real router reverts on a genuine ABI mismatch rather than silently
+// misbehaving.
+const EXACT_INPUT_SINGLE_PARAMS_ABI_TYPE = {
+  type: "tuple",
+  components: [
+    { ...POOL_KEY_ABI_TYPE, name: "poolKey" },
+    { name: "zeroForOne", type: "bool" },
+    { name: "amountIn", type: "uint128" },
+    { name: "amountOutMinimum", type: "uint128" },
+    { name: "minHopPriceX36", type: "uint256" },
+    { name: "hookData", type: "bytes" },
+  ],
+} as const;
+
+type V4PoolKey = {
+  currency0: Address;
+  currency1: Address;
+  fee: number;
+  tickSpacing: number;
+  hooks: Address;
+};
+
+/** Every CLOG v4 pool has native ETH as currency0 and the meme token as
+ * currency1 by construction (PoolManager.initialize requires currency0 <
+ * currency1, and native ETH - address(0) - is the lowest possible address).
+ * Confirmed directly against ClogV4Hook.sol's own contract-level notes, not
+ * assumed here independently. */
+function buildV4PoolKey(tokenAddress: Address, hookAddress: Address): V4PoolKey {
+  return {
+    currency0: "0x0000000000000000000000000000000000000000" as Address,
+    currency1: tokenAddress,
+    fee: 0,
+    tickSpacing: 60,
+    hooks: hookAddress,
+  };
+}
+
+function buildV4SwapCalldata(params: {
+  poolKey: V4PoolKey;
+  zeroForOne: boolean;
+  amountIn: bigint;
+  minAmountOut: bigint;
+  deadline: bigint;
+  settleCurrency: Address;
+  takeCurrency: Address;
+}): { commands: `0x${string}`; inputs: `0x${string}`[] } {
+  const actions = encodePacked(
+    ["uint8", "uint8", "uint8"],
+    [V4_ACTION_SETTLE, V4_ACTION_SWAP_EXACT_IN_SINGLE, V4_ACTION_TAKE_ALL]
+  );
+
+  const settleParams = encodeAbiParameters(
+    [{ type: "address" }, { type: "uint256" }, { type: "bool" }],
+    [params.settleCurrency, params.amountIn, true]
+  );
+  const swapParams = encodeAbiParameters(
+    [EXACT_INPUT_SINGLE_PARAMS_ABI_TYPE],
+    [
+      {
+        poolKey: params.poolKey,
+        zeroForOne: params.zeroForOne,
+        amountIn: params.amountIn,
+        amountOutMinimum: 0n,
+        minHopPriceX36: 0n,
+        // User-controlled deadline, enforced by ClogV4Hook itself before it
+        // ever touches BondingCurveClog - see ClogV4Hook.sol's own
+        // beforeSwap for the exact check.
+        hookData: encodeAbiParameters([{ type: "uint256" }], [params.deadline]),
+      },
+    ]
+  );
+  // Slippage protection lives at the router's own TAKE_ALL minAmount check -
+  // the standard v4 pattern (the router, not the pool/hook, enforces the
+  // user's minimum received).
+  const takeAllParams = encodeAbiParameters(
+    [{ type: "address" }, { type: "uint256" }],
+    [params.takeCurrency, params.minAmountOut]
+  );
+
+  const v4SwapInput = encodeAbiParameters(
+    [{ type: "bytes" }, { type: "bytes[]" }],
+    [actions, [settleParams, swapParams, takeAllParams]]
+  );
+
+  const commands = encodePacked(["uint8"], [UNIVERSAL_ROUTER_COMMAND_V4_SWAP]);
+  return { commands, inputs: [v4SwapInput] };
+}
+
+const NATIVE_ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+
+/** Real, zero-drift quote for the v4 path: ClogV4Hook.quoteExactInput is a
+ * revert-based quoter (the standard v4-periphery Quoter pattern) - it always
+ * reverts with QuoteResult(amountOut), by design, so it can safely call the
+ * real, state-changing BondingCurveClog.buy()/sell() to get an exact answer
+ * and then unwind every state change. Never returns a normal value; the
+ * amount is decoded from the revert data. */
+export async function quoteV4ExactInput(params: {
+  publicClient: NonNullable<ReturnType<typeof usePublicClient>>;
+  tokenAddress: Address;
+  isBuy: boolean;
+  amountIn: bigint;
+  account: Address;
+}): Promise<bigint> {
+  try {
+    await params.publicClient.simulateContract({
+      address: addresses.clogV4Hook!,
+      abi: clogV4HookAbi,
+      functionName: "quoteExactInput",
+      args: [params.tokenAddress, params.isBuy, params.amountIn],
+      value: params.isBuy ? params.amountIn : 0n,
+      account: params.account,
+    });
+    throw new Error("quoteExactInput must always revert with QuoteResult");
+  } catch (err) {
+    if (err instanceof BaseError) {
+      const revertError = err.walk((e) => e instanceof ContractFunctionRevertedError);
+      if (revertError instanceof ContractFunctionRevertedError && revertError.data?.errorName === "QuoteResult") {
+        const [amountOut] = revertError.data.args as [bigint];
+        return amountOut;
+      }
+    }
+    throw err;
+  }
+}
+
+/** Real exact-input ETH -> meme token, through the real Robinhood Universal
+ * Router -> real deployed PoolManager -> ClogV4Hook -> BondingCurveClog. Same
+ * 1% slippage tolerance and 600-second, chain-timestamp-derived deadline as
+ * the direct path (useBuyToken above) - the deadline is passed to the hook
+ * via hookData (abi-encoded uint256), which ClogV4Hook itself enforces
+ * against BondingCurveClog's own deadline check before ever touching curve
+ * state. */
+export function useBuyTokenV4() {
+  const { address } = useAccount();
+  const { run, status, error, txHash, reset } = useContractWrite(translateV4ContractError);
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+
+  const execute = useCallback(
+    async (tokenAddress: Address, ethAmount: number) => {
+      if (!publicClient || !address) throw new Error("no client");
+      if (!addresses.universalRouter || !addresses.clogV4Hook) throw new Error("v4 trading not configured");
+      const value = BigInt(Math.round(ethAmount * 1e18));
+      const poolKey = buildV4PoolKey(tokenAddress, addresses.clogV4Hook);
+
+      await run(async () => {
+        const expectedOut = await quoteV4ExactInput({
+          publicClient,
+          tokenAddress,
+          isBuy: true,
+          amountIn: value,
+          account: address,
+        });
+        const minOut = (expectedOut * 99n) / 100n;
+        const latestBlock = await publicClient.getBlock();
+        const deadline = latestBlock.timestamp + 600n;
+
+        const { commands, inputs } = buildV4SwapCalldata({
+          poolKey,
+          zeroForOne: true,
+          amountIn: value,
+          minAmountOut: minOut,
+          deadline,
+          settleCurrency: NATIVE_ETH_ADDRESS,
+          takeCurrency: tokenAddress,
+        });
+
+        return writeContractAsync({
+          address: addresses.universalRouter!,
+          abi: universalRouterAbi,
+          functionName: "execute",
+          args: [commands, inputs],
+          value,
+        });
+      });
+    },
+    [address, publicClient, run, writeContractAsync]
+  );
+
+  return { execute, status, error, txHash, reset };
+}
+
+/** Real Permit2 allowance state for the v4 sell path - distinct from
+ * useTokenAllowance above (which checks the direct ERC20 allowance to the
+ * BondingCurveClog market itself). The v4 path never approves the market or
+ * the router directly; it goes through Permit2's own two-step allowance:
+ * (1) a standard ERC20 approve from the user to Permit2 itself, (2) a
+ * Permit2-level approve from Permit2 granting the Universal Router an
+ * allowance for that specific token, with its own expiration. Both are
+ * checked here, mirroring useTokenAllowance's own query shape. */
+export function usePermit2AllowanceState(tokenAddress: Address | undefined, owner: Address | undefined) {
+  const publicClient = usePublicClient();
+  const erc20ToPermit2 = useTokenAllowance(tokenAddress, owner, addresses.permit2);
+
+  const permit2ToRouter = useQuery({
+    queryKey: ["clog-permit2-router-allowance", tokenAddress, owner, addresses.universalRouter],
+    enabled: Boolean(tokenAddress && owner && addresses.permit2 && addresses.universalRouter && publicClient),
+    refetchInterval: 15_000,
+    queryFn: async (): Promise<{ amount: bigint; expiration: number }> => {
+      if (!tokenAddress || !owner || !addresses.permit2 || !addresses.universalRouter || !publicClient) {
+        throw new Error("not ready");
+      }
+      const [amount, expiration] = await publicClient.readContract({
+        address: addresses.permit2,
+        abi: permit2Abi,
+        functionName: "allowance",
+        args: [owner, tokenAddress, addresses.universalRouter],
+      });
+      return { amount, expiration };
+    },
+  });
+
+  return {
+    erc20ToPermit2Allowance: erc20ToPermit2.allowance,
+    permit2ToRouterAmount: permit2ToRouter.data?.amount ?? null,
+    permit2ToRouterExpiration: permit2ToRouter.data?.expiration ?? null,
+    isLoading: erc20ToPermit2.isLoading || permit2ToRouter.isLoading,
+  };
+}
+
+/** Step 1 of the v4 sell approval: approve the MemeToken to Permit2 itself
+ * (standard ERC20 approve, one-time per token, reusable across any
+ * Permit2-integrated protocol - not specific to CLOG or to this router). */
+export function useApproveTokenToPermit2() {
+  const { run, status, error, txHash, reset } = useContractWrite(translateV4ContractError);
+  const { writeContractAsync } = useWriteContract();
+
+  const execute = useCallback(
+    async (tokenAddress: Address) => {
+      if (!addresses.permit2) throw new Error("v4 trading not configured");
+      await run(() =>
+        writeContractAsync({
+          address: tokenAddress,
+          abi: memeTokenAbi,
+          functionName: "approve",
+          args: [addresses.permit2!, maxUint256],
+        })
+      );
+    },
+    [run, writeContractAsync]
+  );
+
+  return { execute, status, error, txHash, reset };
+}
+
+/** Step 2 of the v4 sell approval: grant the Universal Router a Permit2-
+ * level allowance for the exact amount about to be sold, with a bounded
+ * expiration (1 hour) rather than an indefinite one - scoped to this trade,
+ * not a standing approval. */
+export function useApprovePermit2ForRouter() {
+  const { run, status, error, txHash, reset } = useContractWrite(translateV4ContractError);
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+
+  const execute = useCallback(
+    async (tokenAddress: Address, amount: bigint) => {
+      if (!publicClient || !addresses.permit2 || !addresses.universalRouter) throw new Error("v4 trading not configured");
+      const latestBlock = await publicClient.getBlock();
+      const expiration = Number(latestBlock.timestamp + 3600n);
+      await run(() =>
+        writeContractAsync({
+          address: addresses.permit2!,
+          abi: permit2Abi,
+          functionName: "approve",
+          args: [tokenAddress, addresses.universalRouter!, amount, expiration],
+        })
+      );
+    },
+    [publicClient, run, writeContractAsync]
+  );
+
+  return { execute, status, error, txHash, reset };
+}
+
+/** Real exact-input meme token -> ETH, through real Permit2 -> the real
+ * Robinhood Universal Router -> real deployed PoolManager -> ClogV4Hook ->
+ * BondingCurveClog. Assumes both Permit2 approval steps above have already
+ * succeeded - TradeWidget's own v4 sell flow gates this call on that state,
+ * exactly as the direct-path sell flow gates on the direct ERC20 approval. */
+export function useSellTokenV4() {
+  const { address } = useAccount();
+  const { run, status, error, txHash, reset } = useContractWrite(translateV4ContractError);
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+
+  const execute = useCallback(
+    async (tokenAddress: Address, tokenAmountWei: bigint) => {
+      if (!publicClient || !address) throw new Error("no client");
+      if (!addresses.universalRouter || !addresses.clogV4Hook) throw new Error("v4 trading not configured");
+      const poolKey = buildV4PoolKey(tokenAddress, addresses.clogV4Hook);
+
+      await run(async () => {
+        const expectedOut = await quoteV4ExactInput({
+          publicClient,
+          tokenAddress,
+          isBuy: false,
+          amountIn: tokenAmountWei,
+          account: address,
+        });
+        const minOut = (expectedOut * 99n) / 100n;
+        const latestBlock = await publicClient.getBlock();
+        const deadline = latestBlock.timestamp + 600n;
+
+        const { commands, inputs } = buildV4SwapCalldata({
+          poolKey,
+          zeroForOne: false,
+          amountIn: tokenAmountWei,
+          minAmountOut: minOut,
+          deadline,
+          settleCurrency: tokenAddress,
+          takeCurrency: NATIVE_ETH_ADDRESS,
+        });
+
+        return writeContractAsync({
+          address: addresses.universalRouter!,
+          abi: universalRouterAbi,
+          functionName: "execute",
+          args: [commands, inputs],
+        });
+      });
+    },
+    [address, publicClient, run, writeContractAsync]
+  );
+
+  return { execute, status, error, txHash, reset };
+}
+
+/** Distinguishes wallet/Permit2/router/hook/curve failures for the v4 path -
+ * layered on top of translateContractError, since a v4 trade failure can
+ * originate from any of five different contracts, and PoolManager's own
+ * Hooks.callHook wraps a reverting hook's error via
+ * CustomRevert.bubbleUpAndRevertWith (confirmed directly against the
+ * vendored v4-core source this session) rather than bubbling the raw
+ * selector - so the underlying reason is nested inside a WrappedError, not
+ * available as the top-level revert reason the way it is on the direct
+ * path. */
+export function translateV4ContractError(err: unknown): string {
+  if (err instanceof Error && /user rejected/i.test(err.message)) {
+    return "Transaction was rejected in your wallet.";
+  }
+  if (err instanceof BaseError) {
+    const revertError = err.walk((e) => e instanceof ContractFunctionRevertedError);
+    if (revertError instanceof ContractFunctionRevertedError) {
+      const name = revertError.data?.errorName;
+      if (name === "WrappedError") {
+        // The hook's own real reason is nested inside - fall back to a
+        // hook-scoped message rather than surfacing the raw wrapper name,
+        // since decoding the nested reason requires the hook's own ABI,
+        // not generically available here.
+        return "The trading hook rejected this swap — it may not recognize this market, or the trade no longer meets its requirements.";
+      }
+      if (name === "UnregisteredMarket") return "This token isn't registered for v4 trading yet.";
+      if (name === "OnlyExactInputSupported") return "Only exact-input trades are supported on the v4 path.";
+      if (name === "DeadlineExpired") return "Transaction took too long and expired — try again.";
+      if (revertError.reason === "expired") return "Transaction took too long and expired — try again.";
+      if (revertError.reason === "slippage") return "Price moved more than expected — try again.";
+    }
+  }
+  // Fall back to the direct-path translator for anything else (ERC20/curve-
+  // level reasons reachable through the hook are the same underlying
+  // reverts BondingCurveClog itself produces).
+  return translateContractError(err);
+}

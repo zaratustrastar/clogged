@@ -42,8 +42,8 @@ contract FullSystemHandler is Test {
     mapping(uint256 => uint256) public candidateCountSnapshot; // recorded once a round finalizes
     mapping(uint256 => bool) public candidateSnapshotTaken;
     mapping(uint256 => uint256) public randomnessRequestIdSnapshot; // recorded the first time a
-        // round's randomness request is observed to have succeeded (0 = not yet observed --
-        // MockRandomnessProvider's first real requestId is always 1, never 0)
+    // round's randomness request is observed to have succeeded (0 = not yet observed --
+    // MockRandomnessProvider's first real requestId is always 1, never 0)
     uint256[] public allocatedRounds; // rounds we've observed become allocated, in order
 
     uint256 public buyCalls;
@@ -115,7 +115,7 @@ contract FullSystemHandler is Test {
         uint256 bal = tokens[m].balanceOf(holders[h]);
         if (bal == 0) return;
         uint256 fraction = bound(fractionSeed, 1, 40); // partial sells only, so sustained
-            // qualification stays realistically reachable for the fuzzer
+        // qualification stays realistically reachable for the fuzzer
         uint256 amount = (bal * fraction) / 100;
         if (amount == 0) return;
         vm.prank(holders[h]);
@@ -145,7 +145,7 @@ contract FullSystemHandler is Test {
     ///      candidate-count snapshot for whichever round just finalized.
     function advanceTimeAndCloseRound(uint256 warpSeed) external {
         uint256 extra = bound(warpSeed, 0, 600);
-        uint256 target = rm.currentRoundOpenTime() + rm.ROUND_DURATION() + extra;
+        uint256 target = rm.currentRoundOpenTime() + rm.roundDuration() + extra;
         if (block.timestamp < target) {
             vm.warp(target);
         }

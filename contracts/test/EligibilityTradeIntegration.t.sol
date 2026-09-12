@@ -40,8 +40,8 @@ contract EligibilityTradeIntegrationTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
 
@@ -57,14 +57,25 @@ contract EligibilityTradeIntegrationTest is Test {
         closedRoundId = rm.closeRoundAndOpenNext();
     }
 
-    function _launchMeme(string memory name, string memory symbol) internal returns (uint256 tokenId, MemeToken token, BondingCurveClog curve) {
+    function _launchMeme(string memory name, string memory symbol)
+        internal
+        returns (uint256 tokenId, MemeToken token, BondingCurveClog curve)
+    {
         uint256 predictedTokenId = engine.nextTokenId();
         MockTickerNFT tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(predictedTokenId, ticketOwner);
 
         token = new MemeToken(name, symbol, address(this));
         curve = new BondingCurveClog(
-            address(token), address(tickerNFT), predictedTokenId, multisig, address(vault), governance, address(engine), VIRTUAL_ETH_SEED, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            predictedTokenId,
+            multisig,
+            address(vault),
+            governance,
+            address(engine),
+            VIRTUAL_ETH_SEED,
+            BUFFER_BPS
         );
         token.setMarket(address(curve));
         tokenId = engine.registerToken(address(curve));
@@ -81,7 +92,11 @@ contract EligibilityTradeIntegrationTest is Test {
         cat.buy{value: 5 ether}(0, block.timestamp); // comfortably crosses MIN_RESERVE
 
         assertGe(cat.realReserve(), MIN_RESERVE, "sanity: this buy must actually cross the threshold");
-        assertEq(engine.aboveThresholdSince(catId), block.timestamp, "the buy that crosses threshold must start the timer, with no separate action needed");
+        assertEq(
+            engine.aboveThresholdSince(catId),
+            block.timestamp,
+            "the buy that crosses threshold must start the timer, with no separate action needed"
+        );
     }
 
     // ── 2: a later trade above threshold preserves the original timer ──────────
@@ -97,7 +112,11 @@ contract EligibilityTradeIntegrationTest is Test {
         vm.prank(bob);
         cat.buy{value: 1 ether}(0, block.timestamp); // still above threshold -- must not reset
 
-        assertEq(engine.aboveThresholdSince(catId), originalStart, "a trade that stays above threshold must never move the streak start forward");
+        assertEq(
+            engine.aboveThresholdSince(catId),
+            originalStart,
+            "a trade that stays above threshold must never move the streak start forward"
+        );
     }
 
     // ── 3: a sell that drops below threshold resets the timer ──────────────────
@@ -140,7 +159,11 @@ contract EligibilityTradeIntegrationTest is Test {
         // The sell succeeded (no revert) -- by construction, that is only possible if the
         // eligibility touch also succeeded and recorded the reset. There is no code path where
         // this sell lands but `aboveThresholdSince` keeps its pre-dip value.
-        assertEq(engine.aboveThresholdSince(catId), 0, "a successful trade that drops reserve below threshold must always carry a correct, immediate reset with it");
+        assertEq(
+            engine.aboveThresholdSince(catId),
+            0,
+            "a successful trade that drops reserve below threshold must always carry a correct, immediate reset with it"
+        );
         assertTrue(cat.realReserve() < MIN_RESERVE);
     }
 
@@ -161,7 +184,10 @@ contract EligibilityTradeIntegrationTest is Test {
         // actually checking. qualify() re-reads current state without trading anything.
         engine.qualify(catId);
 
-        assertFalse(engine.isCandidate(rm.currentRoundId(), catId), "progress gate must independently block qualification even though the reserve timer alone is satisfied");
+        assertFalse(
+            engine.isCandidate(rm.currentRoundId(), catId),
+            "progress gate must independently block qualification even though the reserve timer alone is satisfied"
+        );
     }
 
     // ── 6: after 30 minutes with both gates met, a normal trade qualifies automatically ──
@@ -177,7 +203,10 @@ contract EligibilityTradeIntegrationTest is Test {
         vm.prank(bob);
         cat.buy{value: 0.001 ether}(0, block.timestamp); // an ordinary, otherwise-unremarkable trade
 
-        assertTrue(engine.isCandidate(rm.currentRoundId(), catId), "an ordinary trade after the timer completes must qualify automatically, with no separate keeper/qualify() action");
+        assertTrue(
+            engine.isCandidate(rm.currentRoundId(), catId),
+            "an ordinary trade after the timer completes must qualify automatically, with no separate keeper/qualify() action"
+        );
     }
 
     // ── 7: qualify() still works without any new trade ──────────────────────────
@@ -200,7 +229,7 @@ contract EligibilityTradeIntegrationTest is Test {
     function test_streakSpanningRoundBoundary_remainsValidThroughRealTrading() public {
         (uint256 catId,, BondingCurveClog cat) = _launchMeme("Cat", "CAT");
         uint256 roundKOpen = rm.currentRoundOpenTime();
-        uint256 roundDuration = rm.ROUND_DURATION();
+        uint256 roundDuration = rm.roundDuration();
 
         // Buy happens 45 minutes into round K -- only 15 minutes before it closes, matching the
         // spec's own CAT example (reaches threshold at 12:45, round closes at 13:00).
@@ -221,14 +250,17 @@ contract EligibilityTradeIntegrationTest is Test {
         vm.prank(bob);
         cat.buy{value: 0.001 ether}(0, block.timestamp);
 
-        assertTrue(engine.isCandidate(2, catId), "the streak must carry across the round boundary and qualify into the newly-current round");
+        assertTrue(
+            engine.isCandidate(2, catId),
+            "the streak must carry across the round boundary and qualify into the newly-current round"
+        );
         assertFalse(engine.isCandidate(1, catId), "must never be retroactively added to the already-closed round");
     }
 
     // ── 9: duplicate candidate insertion is impossible through real trading ─────
 
     function test_duplicateCandidateInsertion_impossibleThroughRepeatedTrading() public {
-        (, , BondingCurveClog cat) = _launchMeme("Cat", "CAT");
+        (,, BondingCurveClog cat) = _launchMeme("Cat", "CAT");
         vm.prank(alice);
         cat.buy{value: 5 ether}(0, block.timestamp);
         vm.warp(block.timestamp + REQUIRED_SECONDS);
@@ -241,6 +273,10 @@ contract EligibilityTradeIntegrationTest is Test {
             vm.prank(alice);
             cat.buy{value: 0.01 ether}(0, block.timestamp);
         }
-        assertEq(engine.candidateCount(rm.currentRoundId()), 1, "repeated ordinary trading must never insert the same token twice into one round's candidate list");
+        assertEq(
+            engine.candidateCount(rm.currentRoundId()),
+            1,
+            "repeated ordinary trading must never insert the same token twice into one round's candidate list"
+        );
     }
 }

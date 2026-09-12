@@ -4,10 +4,10 @@ import { useEffect, useState } from "react";
 import { useAccount, useSimulateContract } from "wagmi";
 import { parseUnits } from "viem";
 import { Button } from "@/components/ui/Button";
-import { useBuyToken, useSellToken, useTokenAllowance, useApproveToken, computeSellApprovalState } from "@/lib/hooks/useProtocolActions";
+import { useBuyToken, useSellToken, useTokenAllowance, useApproveToken, computeSellApprovalState, useBuyTokenV4, useSellTokenV4, useApproveTokenToPermit2, useApprovePermit2ForRouter, usePermit2AllowanceState, translateV4ContractError } from "@/lib/hooks/useProtocolActions";
 import { TRADE_TAX_PCT } from "@/lib/constants";
 import { bondingCurveClogAbi } from "@/lib/web3/abis/bondingCurveClog";
-import { env } from "@/lib/web3/env";
+import { env, isV4TradingConfigured } from "@/lib/web3/env";
 import type { TokenDetail } from "@/lib/types";
 import clsx from "clsx";
 
@@ -90,9 +90,22 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
   const { address, isConnected } = useAccount();
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
-  const buy = useBuyToken();
-  const sell = useSellToken();
+
+  // v4 path: wallet -> real Robinhood Universal Router -> real deployed
+  // PoolManager -> the universal ClogV4Hook -> canonical BondingCurveClog.
+  // Active only when isV4TradingConfigured (NEXT_PUBLIC_V4_TRADING_ENABLED
+  // plus every required address actually present - see lib/web3/env.ts).
+  // The direct path below remains fully intact as the exact fallback when
+  // the flag is off, unchanged from before this feature existed.
+  const directBuy = useBuyToken();
+  const directSell = useSellToken();
+  const v4Buy = useBuyTokenV4();
+  const v4Sell = useSellTokenV4();
+  const buy = isV4TradingConfigured ? v4Buy : directBuy;
+  const sell = isV4TradingConfigured ? v4Sell : directSell;
   const approve = useApproveToken();
+  const approveToPermit2 = useApproveTokenToPermit2();
+  const approvePermit2ForRouter = useApprovePermit2ForRouter();
   const active = side === "buy" ? buy : sell;
 
   const numericAmount = parseFloat(amount) || 0;
@@ -113,30 +126,74 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
     }
   }
 
-  // BondingCurveClog.sell() calls token.transferFrom(msg.sender,
-  // address(this), tokenAmount) internally - the market must be an
-  // approved spender first. Only checked/queried on the sell side.
-  const allowance = useTokenAllowance(
-    side === "sell" ? token.tokenAddress : undefined,
+  // Direct path: BondingCurveClog.sell() calls token.transferFrom(msg.sender,
+  // address(this), tokenAmount) internally - the market must be an approved
+  // spender first. v4 path: the user never approves the market or the
+  // router directly - approval goes through Permit2's own two-step
+  // allowance (ERC20 -> Permit2, then Permit2 -> Universal Router).
+  const directAllowance = useTokenAllowance(
+    side === "sell" && !isV4TradingConfigured ? token.tokenAddress : undefined,
     address,
-    side === "sell" ? token.marketAddress : undefined
+    side === "sell" && !isV4TradingConfigured ? token.marketAddress : undefined
   );
-  const allowanceKnown = allowance.allowance !== null;
-  const { checkingAllowance, hasEnoughAllowance, needsApproval } = computeSellApprovalState({
-    allowance: allowance.allowance,
+  const permit2Allowance = usePermit2AllowanceState(
+    side === "sell" && isV4TradingConfigured ? token.tokenAddress : undefined,
+    address
+  );
+
+  const allowanceKnown = isV4TradingConfigured
+    ? permit2Allowance.erc20ToPermit2Allowance !== null && permit2Allowance.permit2ToRouterAmount !== null
+    : directAllowance.allowance !== null;
+
+  const directApprovalState = computeSellApprovalState({
+    allowance: directAllowance.allowance,
     sellAmountWei,
   });
+  // v4 approval is "enough" only once BOTH Permit2 steps are satisfied for
+  // at least the amount being sold - the ERC20->Permit2 approval is
+  // typically a one-time max approval (checked as nonzero and sufficient),
+  // and the Permit2->Router allowance must cover this exact sell amount and
+  // not have expired.
+  const needsErc20ToPermit2 =
+    sellAmountWei !== null && (permit2Allowance.erc20ToPermit2Allowance ?? 0n) < sellAmountWei;
+  const needsPermit2ToRouter =
+    sellAmountWei !== null &&
+    ((permit2Allowance.permit2ToRouterAmount ?? 0n) < sellAmountWei ||
+      (permit2Allowance.permit2ToRouterExpiration ?? 0) * 1000 < Date.now());
+  const { checkingAllowance, hasEnoughAllowance, needsApproval } = isV4TradingConfigured
+    ? {
+        checkingAllowance: sellAmountWei !== null && !allowanceKnown,
+        hasEnoughAllowance: sellAmountWei !== null && !needsErc20ToPermit2 && !needsPermit2ToRouter,
+        needsApproval: needsErc20ToPermit2 || needsPermit2ToRouter,
+      }
+    : directApprovalState;
 
   const quote = useTradeQuote(token.marketAddress, side, numericAmount, sellAmountWei, hasEnoughAllowance);
 
   async function onApprove() {
     if (!sellAmountWei) return;
-    await approve.execute(token.tokenAddress, token.marketAddress, sellAmountWei);
+    if (isV4TradingConfigured) {
+      // Two real, separate transactions - never combined into one, since
+      // each is independently useful (the ERC20->Permit2 step is a
+      // one-time, reusable-across-any-Permit2-protocol approval) and each
+      // has its own on-chain confirmation the UI should reflect.
+      if (needsErc20ToPermit2) {
+        await approveToPermit2.execute(token.tokenAddress);
+      }
+      await approvePermit2ForRouter.execute(token.tokenAddress, sellAmountWei);
+    } else {
+      await approve.execute(token.tokenAddress, token.marketAddress, sellAmountWei);
+    }
   }
 
   async function onSubmit() {
-    if (side === "buy") await buy.execute(token.marketAddress, numericAmount);
-    else if (sellAmountWei !== null) await sell.execute(token.marketAddress, sellAmountWei);
+    if (side === "buy") {
+      if (isV4TradingConfigured) await v4Buy.execute(token.tokenAddress, numericAmount);
+      else await directBuy.execute(token.marketAddress, numericAmount);
+    } else if (sellAmountWei !== null) {
+      if (isV4TradingConfigured) await v4Sell.execute(token.tokenAddress, sellAmountWei);
+      else await directSell.execute(token.marketAddress, sellAmountWei);
+    }
   }
 
   if (active.status === "success") {
@@ -232,11 +289,35 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
       </div>
 
       {!isConnected && <p className="mt-3 text-xs text-ink-faint">Connect a wallet to trade.</p>}
+      {side === "sell" && isV4TradingConfigured && needsApproval && (
+        <p className="mt-2 text-xs text-ink-faint">
+          {needsErc20ToPermit2
+            ? "Step 1 of 2: approve this token to Permit2 (one-time, reusable for any Permit2 trade)."
+            : "Step 2 of 2: authorize the Universal Router via Permit2 for this trade."}
+        </p>
+      )}
       {side === "sell" && approve.status === "success" && needsApproval && (
         <p className="mt-3 text-xs text-cyan">Approval confirmed — updating…</p>
       )}
-      {approve.error && <p className="mt-3 text-xs text-danger">{approve.error}</p>}
-      {active.error && <p className="mt-3 text-xs text-danger">{active.error}</p>}
+      {side === "sell" && approveToPermit2.status === "success" && needsErc20ToPermit2 && (
+        <p className="mt-3 text-xs text-cyan">Permit2 approval confirmed — updating…</p>
+      )}
+      {side === "sell" && approvePermit2ForRouter.status === "success" && needsPermit2ToRouter && (
+        <p className="mt-3 text-xs text-cyan">Universal Router authorization confirmed — updating…</p>
+      )}
+      {approve.error && <p className="mt-3 text-xs text-danger">ERC20 approval failed: {approve.error}</p>}
+      {approveToPermit2.error && (
+        <p className="mt-3 text-xs text-danger">Permit2 approval failed: {approveToPermit2.error}</p>
+      )}
+      {approvePermit2ForRouter.error && (
+        <p className="mt-3 text-xs text-danger">Universal Router authorization failed: {approvePermit2ForRouter.error}</p>
+      )}
+      {active.error && (
+        <p className="mt-3 text-xs text-danger">
+          {isV4TradingConfigured ? "Trade failed: " : ""}
+          {active.error}
+        </p>
+      )}
 
       {side === "sell" && needsApproval ? (
         <Button
@@ -244,10 +325,27 @@ export function TradeWidget({ token }: { token: TokenDetail }) {
           size="lg"
           className="mt-4"
           variant="secondary"
-          disabled={!isConnected || sellAmountWei === null || sellAmountWei <= 0n || approve.status === "pending"}
+          disabled={
+            !isConnected ||
+            sellAmountWei === null ||
+            sellAmountWei <= 0n ||
+            approve.status === "pending" ||
+            approveToPermit2.status === "pending" ||
+            approvePermit2ForRouter.status === "pending"
+          }
           onClick={onApprove}
         >
-          {approve.status === "pending" ? "Confirm in wallet…" : `Approve ${token.ticker}`}
+          {isV4TradingConfigured
+            ? needsErc20ToPermit2
+              ? approveToPermit2.status === "pending"
+                ? "Confirm in wallet…"
+                : `Approve ${token.ticker} for Permit2`
+              : approvePermit2ForRouter.status === "pending"
+                ? "Confirm in wallet…"
+                : "Authorize Universal Router"
+            : approve.status === "pending"
+              ? "Confirm in wallet…"
+              : `Approve ${token.ticker}`}
         </Button>
       ) : (
         <Button

@@ -11,4 +11,9 @@ export const addresses = {
   eligibilityRegistry: env.eligibilityRegistry as Address | undefined,
   roundManager: env.roundManager as Address | undefined,
   rewardVault: env.rewardVault as Address | undefined,
+
+  v4PoolManager: env.v4PoolManager as Address | undefined,
+  universalRouter: env.universalRouter as Address | undefined,
+  permit2: env.permit2 as Address | undefined,
+  clogV4Hook: env.clogV4Hook as Address | undefined,
 };

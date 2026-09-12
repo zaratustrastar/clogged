@@ -69,6 +69,13 @@ contract DeployRobinhoodChainTimelockTest is Test {
         vm.setEnv("FEE_MULTISIG_ADDRESS", vm.toString(safe));
         vm.setEnv("GOVERNANCE_PROPOSER_ADDRESS", vm.toString(governanceProposer));
         vm.setEnv("TICKER_NFT_BASE_URI", "https://clog.run/api/ticker-metadata/");
+        // Production-scale threshold values (unrelated to what this file tests - timelock
+        // governance topology, not economic thresholds) - matches what were previously hardcoded
+        // constants on EligibilityRegistry/RoundManager, now required deployment-time config.
+        vm.setEnv("MIN_PROGRESS_BPS", "500");
+        vm.setEnv("MIN_RESERVE_THRESHOLD_WEI", "229000000000000000");
+        vm.setEnv("REQUIRED_ABSOLUTE_SECONDS", "1800");
+        vm.setEnv("ROUND_DURATION_SECONDS", "3600");
     }
 
     function test_missingGovernanceProposerEnvVar_revertsLoudly_notSilentDefault() public {

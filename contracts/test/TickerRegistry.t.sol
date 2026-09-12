@@ -30,7 +30,7 @@ contract TickerRegistryTest is Test {
     function setUp() public {
         virtualEthSeed = (5e9 * virtualTokenSeed) / 1e18;
 
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(address(0xD00D));
 
         nft = new TickerNFT("Ticker", "TICK", address(this), "https://example.com/metadata/");
@@ -49,9 +49,9 @@ contract TickerRegistryTest is Test {
         registry.commit(hash);
         vm.warp(this._now() + registry.MIN_REVEAL_DELAY());
         uint256 price = registry.LAUNCH_PRICE(); // capture BEFORE the prank, so evaluating it here
-            // doesn't consume the prank meant for reveal() itself (vm.prank only affects the very
-            // next call, and `registry.LAUNCH_PRICE()` inside the {value: ...} expression below
-            // would otherwise be that call).
+        // doesn't consume the prank meant for reveal() itself (vm.prank only affects the very
+        // next call, and `registry.LAUNCH_PRICE()` inside the {value: ...} expression below
+        // would otherwise be that call).
         vm.prank(user);
         tokenId = registry.reveal{value: price}(ticker, salt);
     }

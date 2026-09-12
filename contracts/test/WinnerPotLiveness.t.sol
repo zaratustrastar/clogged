@@ -57,9 +57,17 @@ contract WinnerPotLivenessTest is Test {
         MockTickerNFT tickerNFT = new MockTickerNFT();
         token = new MemeToken("Cat", "CAT", address(this));
         tickerNFT.setOwner(1, ticketOwner);
-        EligibilityRegistry engine = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         market = new BondingCurveClog(
-            address(token), address(tickerNFT), 1, multisig, address(vault), governance, address(engine), virtualEthSeed, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            1,
+            multisig,
+            address(vault),
+            governance,
+            address(engine),
+            virtualEthSeed,
+            BUFFER_BPS
         );
         token.setMarket(address(market));
         uint256 registeredId = engine.registerToken(address(market));
@@ -111,7 +119,11 @@ contract WinnerPotLivenessTest is Test {
         // whole transaction's gas -- the call fails cheaply (out of the allotted 50k gas) rather
         // than dragging the entire buy transaction toward the block gas limit.
         market.buy{value: 1 ether}(0, block.timestamp);
-        assertGt(market.pendingWinnerPot(), 0, "the gas-griefing attempt must show up as a failed delivery, not silently vanish");
+        assertGt(
+            market.pendingWinnerPot(),
+            0,
+            "the gas-griefing attempt must show up as a failed delivery, not silently vanish"
+        );
     }
 
     function test_permissionlessFlush_retrySucceedsOnceRewardVaultRecovers() public {
@@ -143,7 +155,9 @@ contract WinnerPotLivenessTest is Test {
         // Flush attempted while RewardVault is STILL broken.
         market.flushPendingWinnerPot();
 
-        assertEq(market.pendingWinnerPot(), pendingBefore, "still-failing flush must restore the exact same pending amount");
+        assertEq(
+            market.pendingWinnerPot(), pendingBefore, "still-failing flush must restore the exact same pending amount"
+        );
         assertEq(market.deliveredWinnerPot(), 0);
         assertEq(market.winnerPotGenerated(), market.deliveredWinnerPot() + market.pendingWinnerPot());
     }

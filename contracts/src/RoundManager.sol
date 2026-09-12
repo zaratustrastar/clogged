@@ -5,8 +5,13 @@ import {EligibilityRegistry} from "./EligibilityRegistry.sol";
 import {IRandomnessProvider} from "./IRandomnessProvider.sol";
 
 interface IRewardVault {
-    function allocateRound(uint256 roundId, uint256 winnerTokenId, address market, uint256 windowOpen, uint256 windowClose)
-        external;
+    function allocateRound(
+        uint256 roundId,
+        uint256 winnerTokenId,
+        address market,
+        uint256 windowOpen,
+        uint256 windowClose
+    ) external;
 }
 
 /// @title RoundManager
@@ -34,10 +39,12 @@ contract RoundManager {
     IRewardVault public rewardVault;
     address public governance;
 
-    uint256 public constant ROUND_DURATION = 3600; // seconds
+    uint256 public immutable roundDuration; // seconds; deployment-configured, no setter -- e.g.
+    // a short value for a canary rehearsal, 3600 in production; the round-close/candidate/
+    // draw algorithm itself is identical bit-for-bit regardless of this value.
     uint256 public constant MIN_DRAW_CANDIDATES = 3; // below this, a round is skipped (no VRF
-        // requested) and the pot simply keeps accumulating into whichever future round first
-        // clears the bar.
+    // requested) and the pot simply keeps accumulating into whichever future round first
+    // clears the bar.
 
     uint256 public currentRoundId;
     uint256 public currentRoundOpenTime;
@@ -46,8 +53,8 @@ contract RoundManager {
         uint256 openTime;
         uint256 closeTime;
         uint256 candidateRoundId; // which EligibilityRegistry generation this round draws from
-            // (== roundId itself now -- no lag: a round draws from candidates that qualified while
-            // it was open, not the round before it; see EligibilityRegistry's contract-level notes)
+        // (== roundId itself now -- no lag: a round draws from candidates that qualified while
+        // it was open, not the round before it; see EligibilityRegistry's contract-level notes)
         uint256 candidateCount;
         bool closed;
         bool drawSkipped; // true if candidateCount < MIN_DRAW_CANDIDATES -- no VRF requested
@@ -72,11 +79,13 @@ contract RoundManager {
         _;
     }
 
-    constructor(address engine_, address randomnessProvider_, address governance_) {
+    constructor(address engine_, address randomnessProvider_, address governance_, uint256 roundDuration_) {
         require(engine_ != address(0) && randomnessProvider_ != address(0) && governance_ != address(0), "zero address");
+        require(roundDuration_ > 0, "invalid roundDuration");
         engine = EligibilityRegistry(engine_);
         randomnessProvider = IRandomnessProvider(randomnessProvider_);
         governance = governance_;
+        roundDuration = roundDuration_;
 
         currentRoundId = 1;
         currentRoundOpenTime = block.timestamp;
@@ -115,15 +124,15 @@ contract RoundManager {
     ///      eventual randomness/settlement timing is entirely independent of every other round's,
     ///      and independent of however many NEWER rounds have since opened and closed.
     function closeRoundAndOpenNext() external returns (uint256 closedRoundId) {
-        require(block.timestamp >= currentRoundOpenTime + ROUND_DURATION, "round not over yet");
+        require(block.timestamp >= currentRoundOpenTime + roundDuration, "round not over yet");
 
         closedRoundId = currentRoundId;
         RoundInfo storage r = rounds[closedRoundId];
         r.closeTime = block.timestamp;
         r.closed = true;
         r.candidateRoundId = closedRoundId; // no lag: draws from candidates that qualified into
-            // this same round while it was open (see EligibilityRegistry's contract-level notes) --
-            // this is what lets the very first round the protocol ever opens produce a winner
+        // this same round while it was open (see EligibilityRegistry's contract-level notes) --
+        // this is what lets the very first round the protocol ever opens produce a winner
 
         currentRoundId += 1;
         currentRoundOpenTime = block.timestamp;

@@ -108,7 +108,7 @@ contract ClogUniversalRouterTest is Test {
 
     function setUp() public {
         manager = new PoolManager(address(this));
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(makeAddr("roundManager"));
         tickerNFT =
             new TickerNFT("PMFI Casino Tickers", "TICKER", address(this), "https://clog.run/api/ticker-metadata/");

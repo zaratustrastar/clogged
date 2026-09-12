@@ -14,11 +14,14 @@ contract EligibilityRegistryTest is Test {
     }
 
     function setUp() public {
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(roundManager);
     }
 
-    function _makeToken(uint256 reserveWei, uint256 progressBps) internal returns (uint256 tokenId, MockReserveMarket m) {
+    function _makeToken(uint256 reserveWei, uint256 progressBps)
+        internal
+        returns (uint256 tokenId, MockReserveMarket m)
+    {
         m = new MockReserveMarket();
         m.setReserve(reserveWei);
         m.setProgressBps(progressBps);
@@ -37,7 +40,9 @@ contract EligibilityRegistryTest is Test {
         engine.onTrade(id); // streak starts
         vm.warp(openT + 1800);
         engine.onTrade(id); // confirming touch after 30 minutes
-        assertTrue(engine.isCandidate(1, id), "a freshly launched token must be able to qualify for its own round's draw");
+        assertTrue(
+            engine.isCandidate(1, id), "a freshly launched token must be able to qualify for its own round's draw"
+        );
     }
 
     function test_progressGate_blocksLowProgressToken() public {
@@ -129,7 +134,9 @@ contract EligibilityRegistryTest is Test {
         engine.qualify(id);
         engine.qualify(id);
         engine.onTrade(id);
-        assertEq(engine.candidateCount(1), 1, "must never be added twice regardless of how many times touched afterward");
+        assertEq(
+            engine.candidateCount(1), 1, "must never be added twice regardless of how many times touched afterward"
+        );
     }
 
     function test_acceptedCaveat_neverTouchedAgain_doesNotQualify() public {
@@ -137,7 +144,9 @@ contract EligibilityRegistryTest is Test {
         uint256 openT = this._now();
         engine.onTrade(id);
         vm.warp(openT + 3600);
-        assertFalse(engine.isCandidate(1, id), "without a later touch or explicit qualify, a token misses the round -- accepted");
+        assertFalse(
+            engine.isCandidate(1, id), "without a later touch or explicit qualify, a token misses the round -- accepted"
+        );
     }
 
     function test_qualificationAfterCutoff_cannotAffectFrozenRound() public {
@@ -209,7 +218,9 @@ contract EligibilityRegistryTest is Test {
                 }
             }
         }
-        for (uint256 i = 0; i < 4; i++) assertTrue(seen[i], "every token must appear");
+        for (uint256 i = 0; i < 4; i++) {
+            assertTrue(seen[i], "every token must appear");
+        }
     }
 
     /// @notice Round-close gas independent of total token count: `openRound` (the only thing
@@ -247,19 +258,21 @@ contract EligibilityRegistryTest is Test {
         engine.openRound(4, this._now());
         uint256 gasBusy = gasBusyBefore - gasleft();
 
-        assertApproxEqAbs(gasBusy, gasEmpty, 5_000, "closing with 300 already-qualified tokens must cost the same as an empty round");
+        assertApproxEqAbs(
+            gasBusy, gasEmpty, 5_000, "closing with 300 already-qualified tokens must cost the same as an empty round"
+        );
     }
 
     // ── setRoundManager one-time initialization ─────────────────────────────
 
     function test_setRoundManager_deployerCanInitializeOnce() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         fresh.setRoundManager(address(0x9999));
         assertEq(fresh.roundManager(), address(0x9999));
     }
 
     function test_setRoundManager_secondInitializationReverts() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         fresh.setRoundManager(address(0x9999));
         vm.expectRevert();
         fresh.setRoundManager(address(0x8888));
@@ -267,20 +280,20 @@ contract EligibilityRegistryTest is Test {
     }
 
     function test_setRoundManager_unauthorizedCannotInitialize() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         vm.prank(address(0xBEEF)); // not the deployer
         vm.expectRevert();
         fresh.setRoundManager(address(0x9999));
     }
 
     function test_setRoundManager_zeroAddressRejected() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         vm.expectRevert();
         fresh.setRoundManager(address(0));
     }
 
     function test_constructor_zeroDeployerRejected() public {
         vm.expectRevert();
-        new EligibilityRegistry(address(0));
+        new EligibilityRegistry(address(0), 500, 0.229 ether, 1_800);
     }
 }

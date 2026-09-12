@@ -89,6 +89,16 @@ contract DeployRobinhoodChain is Script {
         // The sole Timelock proposer/canceller -- an explicit, required env var, never
         // msg.sender. See the contract-level governance-topology note above for why.
         address governanceProposer = vm.envAddress("GOVERNANCE_PROPOSER_ADDRESS");
+        // Deployment-configurable economic/timing thresholds -- required, no default (an operator
+        // who forgets one gets a clear revert here, never a silent production-scale or
+        // canary-scale value neither of them meant to set). These are the ONLY levers a canary
+        // deployment needs to pull for a fast, cheap end-to-end rehearsal: the qualification
+        // algorithm, round-close/draw logic, fee economics, bonding curve, and CLOG release are
+        // identical bit-for-bit regardless of these four values.
+        uint256 minProgressBps = vm.envUint("MIN_PROGRESS_BPS");
+        uint256 minReserveThresholdWei = vm.envUint("MIN_RESERVE_THRESHOLD_WEI");
+        uint256 requiredAbsoluteSeconds = vm.envUint("REQUIRED_ABSOLUTE_SECONDS");
+        uint256 roundDurationSeconds = vm.envUint("ROUND_DURATION_SECONDS");
 
         vm.startBroadcast();
 
@@ -108,10 +118,11 @@ contract DeployRobinhoodChain is Script {
         // engine and provider are deployed first (deployer authorized to wire RoundManager back
         // via a one-time setter), RoundManager second using their real, already-known addresses
         // directly. No CREATE-nonce address prediction anywhere in this flow.
-        d.engine = new EligibilityRegistry(msg.sender);
+        d.engine = new EligibilityRegistry(msg.sender, minProgressBps, minReserveThresholdWei, requiredAbsoluteSeconds);
         d.randomnessProvider =
             new ChainlinkRandomnessProvider(ccipRouter, arbitrumChainSelector, governance, msg.sender);
-        d.roundManager = new RoundManager(address(d.engine), address(d.randomnessProvider), governance);
+        d.roundManager =
+            new RoundManager(address(d.engine), address(d.randomnessProvider), governance, roundDurationSeconds);
         d.engine.setRoundManager(address(d.roundManager));
         d.randomnessProvider.setRoundManager(address(d.roundManager));
 

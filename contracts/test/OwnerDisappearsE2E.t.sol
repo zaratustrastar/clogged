@@ -67,9 +67,9 @@ contract OwnerDisappearsE2ETest is Test {
         subId = vrfCoordinator.createSubscription();
         vrfCoordinator.fundSubscription(subId, 1_000_000 ether);
 
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         provider = new ChainlinkRandomnessProvider(address(router), MOCK_SELECTOR, governance, address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
         vm.deal(address(provider), 10 ether);
@@ -90,14 +90,25 @@ contract OwnerDisappearsE2ETest is Test {
         vm.deal(bob, 100 ether);
     }
 
-    function _launchMeme(string memory name, string memory symbol) internal returns (uint256 tokenId, BondingCurveClog market) {
+    function _launchMeme(string memory name, string memory symbol)
+        internal
+        returns (uint256 tokenId, BondingCurveClog market)
+    {
         uint256 predictedTokenId = engine.nextTokenId();
         MockTickerNFT tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(predictedTokenId, ticketOwner);
 
         MemeToken token = new MemeToken(name, symbol, address(this));
         market = new BondingCurveClog(
-            address(token), address(tickerNFT), predictedTokenId, multisig, address(vault), governance, address(engine), VIRTUAL_ETH_SEED, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            predictedTokenId,
+            multisig,
+            address(vault),
+            governance,
+            address(engine),
+            VIRTUAL_ETH_SEED,
+            BUFFER_BPS
         );
         token.setMarket(address(market));
         tokenId = engine.registerToken(address(market));
@@ -134,12 +145,14 @@ contract OwnerDisappearsE2ETest is Test {
         vm.prank(alice);
         fishMarket.buy{value: 5 ether}(0, block.timestamp);
 
-        assertGt(engine.aboveThresholdSince(catId), 0, "the buy itself must have started the timer with no separate action");
+        assertGt(
+            engine.aboveThresholdSince(catId), 0, "the buy itself must have started the timer with no separate action"
+        );
         assertGt(engine.aboveThresholdSince(dogId), 0);
         assertGt(engine.aboveThresholdSince(fishId), 0);
 
         // ── All 3 meet qualification; candidates enter the current round ──────
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2);
+        vm.warp(roundOpen + rm.roundDuration() / 2);
         // Confirming touches -- an arbitrary caller, not a launcher/owner/holder, can do this.
         vm.prank(randomCallerA);
         engine.qualify(catId);
@@ -150,14 +163,17 @@ contract OwnerDisappearsE2ETest is Test {
         assertEq(engine.candidateCount(1), 3);
 
         // ── Hour ends; an arbitrary permissionless caller closes the round ─────
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         vm.prank(randomCallerB);
         uint256 closedRoundId = rm.closeRoundAndOpenNext();
         assertEq(closedRoundId, 1);
         assertEq(rm.currentRoundId(), 2, "the next round must have opened");
 
         RoundManager.RoundInfo memory infoAfterClose = rm.getRound(1);
-        assertTrue(infoAfterClose.randomnessRequested, "the request succeeded on the first attempt here -- the failure is introduced deliberately below instead");
+        assertTrue(
+            infoAfterClose.randomnessRequested,
+            "the request succeeded on the first attempt here -- the failure is introduced deliberately below instead"
+        );
 
         // Complete round 1's own settlement immediately, independent of everything that follows --
         // this proves multiple rounds can be genuinely in flight/settled on their own schedules.
@@ -183,7 +199,7 @@ contract OwnerDisappearsE2ETest is Test {
         vm.prank(alice);
         fishMarket2.buy{value: 5 ether}(0, block.timestamp);
 
-        vm.warp(round2Open + rm.ROUND_DURATION() / 2);
+        vm.warp(round2Open + rm.roundDuration() / 2);
         vm.prank(randomCallerC);
         engine.qualify(catId2);
         vm.prank(randomCallerC);
@@ -197,7 +213,7 @@ contract OwnerDisappearsE2ETest is Test {
         router.setFee(0.05 ether);
         vm.deal(address(provider), 0);
 
-        vm.warp(round2Open + rm.ROUND_DURATION());
+        vm.warp(round2Open + rm.roundDuration());
         vm.prank(randomCallerB);
         rm.closeRoundAndOpenNext(); // must succeed even though the randomness request inside it fails
 
@@ -208,7 +224,7 @@ contract OwnerDisappearsE2ETest is Test {
         assertFalse(infoRound2.settled);
 
         // ── Future round still operates while round 2 is stuck ────────────────
-        vm.warp(this._now() + rm.ROUND_DURATION());
+        vm.warp(this._now() + rm.roundDuration());
         vm.prank(randomCallerD);
         rm.closeRoundAndOpenNext(); // round 3 closes trivially (no candidates), round 4 opens
         assertEq(rm.currentRoundId(), 4, "round progression must continue independent of round 2's stuck state");
@@ -237,7 +253,9 @@ contract OwnerDisappearsE2ETest is Test {
         wrapper.relayRandomness(infoRetried.randomnessRequestId);
         (uint256 wordAfterFailedRelay, bool fulfilledAfterFailedRelay, bool relayedAfterFailedRelay) =
             wrapper.fulfilledRequests(infoRetried.randomnessRequestId);
-        assertEq(wordAfterFailedRelay, storedWord, "the stored word must be completely unaffected by a failed relay attempt");
+        assertEq(
+            wordAfterFailedRelay, storedWord, "the stored word must be completely unaffected by a failed relay attempt"
+        );
         assertTrue(fulfilledAfterFailedRelay);
         assertFalse(relayedAfterFailedRelay);
         assertFalse(rm.getRound(2).settled);
@@ -259,7 +277,11 @@ contract OwnerDisappearsE2ETest is Test {
         // retroactive change to any other round's state as a side effect of round 2 settling late.
         assertTrue(rm.getRound(1).settled, "round 1's own earlier, independent settlement must be untouched");
         assertFalse(rm.getRound(3).settled, "round 3 (no candidates, skipped) must remain unsettled, exactly as it was");
-        assertEq(rm.currentRoundId(), 4, "current round progression must be completely unaffected by round 2's late settlement");
+        assertEq(
+            rm.currentRoundId(),
+            4,
+            "current round progression must be completely unaffected by round 2's late settlement"
+        );
 
         // ── Winning holders can claim ────────────────────────────────────────
         RewardVault.RoundAllocation memory alloc = vault.getAllocation(2);
@@ -272,7 +294,11 @@ contract OwnerDisappearsE2ETest is Test {
             // holder's behalf; funds go only to the holder, never the caller.
             vm.prank(randomCallerD);
             vault.claim(2, winnerHolder);
-            assertEq(winnerHolder.balance, balBefore + claimable, "the winning holder must receive their exact claimable share");
+            assertEq(
+                winnerHolder.balance,
+                balBefore + claimable,
+                "the winning holder must receive their exact claimable share"
+            );
         }
     }
 }

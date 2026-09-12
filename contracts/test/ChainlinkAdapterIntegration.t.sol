@@ -57,9 +57,9 @@ contract ChainlinkAdapterIntegrationTest is Test {
         // provider each get RoundManager's real address wired back afterward via a one-time
         // setter) -- deploy engine and provider first, RoundManager second using their real
         // addresses directly, then wire the relationship back. No CREATE-address prediction.
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         provider = new ChainlinkRandomnessProvider(address(router), MOCK_SELECTOR, governance, address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
         vm.deal(address(provider), 10 ether);
@@ -80,14 +80,25 @@ contract ChainlinkAdapterIntegrationTest is Test {
         vm.deal(bob, 100 ether);
     }
 
-    function _launchMeme(string memory name, string memory symbol) internal returns (uint256 tokenId, BondingCurveClog market) {
+    function _launchMeme(string memory name, string memory symbol)
+        internal
+        returns (uint256 tokenId, BondingCurveClog market)
+    {
         uint256 predictedTokenId = engine.nextTokenId();
         MockTickerNFT tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(predictedTokenId, ticketOwner);
 
         MemeToken token = new MemeToken(name, symbol, address(this));
         market = new BondingCurveClog(
-            address(token), address(tickerNFT), predictedTokenId, multisig, address(vault), governance, address(engine), VIRTUAL_ETH_SEED, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            predictedTokenId,
+            multisig,
+            address(vault),
+            governance,
+            address(engine),
+            VIRTUAL_ETH_SEED,
+            BUFFER_BPS
         );
         token.setMarket(address(market));
         tokenId = engine.registerToken(address(market));
@@ -112,7 +123,7 @@ contract ChainlinkAdapterIntegrationTest is Test {
         fishMarket.buy{value: 5 ether}(0, block.timestamp);
         engine.onTrade(fishId);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2); // 30 minutes in, well before round 1 closes
+        vm.warp(roundOpen + rm.roundDuration() / 2); // 30 minutes in, well before round 1 closes
         // Confirming touch after the 30-minute mark locks in candidacy (live qualification model).
         engine.qualify(catId);
         engine.qualify(dogId);
@@ -126,7 +137,7 @@ contract ChainlinkAdapterIntegrationTest is Test {
         // wrapper -> real VRF request -> [we fulfill via the official VRF mock below, which now
         // only stores the word] -> [permissionless relayRandomness sends it via CCIP] -> provider
         // -> RoundManager.onRandomnessReceived -> winner settled -> RewardVault allocated.
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         uint256 closedRoundId = rm.closeRoundAndOpenNext();
         assertEq(closedRoundId, 1);
 
@@ -154,9 +165,13 @@ contract ChainlinkAdapterIntegrationTest is Test {
         );
 
         address winnerMarket = engine.tokenMarket(info.winnerTokenId);
-        assertTrue(winnerMarket == address(catMarket) || winnerMarket == address(dogMarket) || winnerMarket == address(fishMarket));
+        assertTrue(
+            winnerMarket == address(catMarket) || winnerMarket == address(dogMarket)
+                || winnerMarket == address(fishMarket)
+        );
 
-        address winnerHolder = winnerMarket == address(catMarket) ? alice : winnerMarket == address(dogMarket) ? bob : alice;
+        address winnerHolder =
+            winnerMarket == address(catMarket) ? alice : winnerMarket == address(dogMarket) ? bob : alice;
         uint256 claimable = vault.previewClaim(1, winnerHolder);
         if (claimable > 0) {
             uint256 balBefore = winnerHolder.balance;
@@ -193,13 +208,13 @@ contract ChainlinkAdapterIntegrationTest is Test {
         vm.prank(alice);
         fishMarket.buy{value: 5 ether}(0, block.timestamp);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2);
+        vm.warp(roundOpen + rm.roundDuration() / 2);
         engine.qualify(catId);
         engine.qualify(dogId);
         engine.qualify(fishId);
         assertEq(engine.candidateCount(1), 3);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         rm.closeRoundAndOpenNext();
         RoundManager.RoundInfo memory info = rm.getRound(1);
         assertTrue(info.randomnessRequested);
@@ -230,6 +245,8 @@ contract ChainlinkAdapterIntegrationTest is Test {
         assertTrue(settled.winnerTokenId == catId || settled.winnerTokenId == dogId || settled.winnerTokenId == fishId);
 
         RewardVault.RoundAllocation memory alloc = vault.getAllocation(1);
-        assertGt(alloc.jackpotAmount, 0, "RewardVault must have received a real allocation from the correctly-settled round");
+        assertGt(
+            alloc.jackpotAmount, 0, "RewardVault must have received a real allocation from the correctly-settled round"
+        );
     }
 }

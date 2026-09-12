@@ -41,8 +41,8 @@ contract FullSystemInvariantTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
 
@@ -63,7 +63,15 @@ contract FullSystemInvariantTest is Test {
 
             tokens[i] = new MemeToken(names[i], symbols[i], address(this));
             markets[i] = new BondingCurveClog(
-                address(tokens[i]), address(tickerNFT), predictedTokenId, multisig, address(vault), governance, address(engine), VIRTUAL_ETH_SEED, BUFFER_BPS
+                address(tokens[i]),
+                address(tickerNFT),
+                predictedTokenId,
+                multisig,
+                address(vault),
+                governance,
+                address(engine),
+                VIRTUAL_ETH_SEED,
+                BUFFER_BPS
             );
             tokens[i].setMarket(address(markets[i]));
             tokenIds[i] = engine.registerToken(address(markets[i]));
@@ -140,7 +148,9 @@ contract FullSystemInvariantTest is Test {
                     assertEq(paid, snapshot, "amount actually paid must match the snapshot taken at allocation time");
                 } else {
                     uint256 current = vault.previewClaim(roundId, holder);
-                    assertEq(current, snapshot, "unclaimed entitlement must remain exactly what it was at allocation time");
+                    assertEq(
+                        current, snapshot, "unclaimed entitlement must remain exactly what it was at allocation time"
+                    );
                 }
             }
         }
@@ -211,7 +221,11 @@ contract FullSystemInvariantTest is Test {
                 totalOutstanding += (a.jackpotAmount - a.totalClaimed);
             }
         }
-        assertLe(totalOutstanding, address(vault).balance, "RewardVault must always hold enough ETH to cover every outstanding liability");
+        assertLe(
+            totalOutstanding,
+            address(vault).balance,
+            "RewardVault must always hold enough ETH to cover every outstanding liability"
+        );
     }
 
     /// @notice Sanity invariant: the winnerPot accounting identity must hold across every market
@@ -235,7 +249,7 @@ contract FullSystemInvariantTest is Test {
     ///         current on-chain state -- no ghost snapshot needed, since this must hold at every
     ///         single point in time, not just across a before/after comparison.
     function invariant_reserveStateNeverDivergesFromEligibilityTimer() public view {
-        uint256 threshold = engine.MIN_RESERVE_THRESHOLD();
+        uint256 threshold = engine.minReserveThreshold();
         for (uint256 i = 0; i < 3; i++) {
             BondingCurveClog m = handler.markets(i);
             uint256 tokenId = handler.tokenIds(i);
@@ -259,7 +273,11 @@ contract FullSystemInvariantTest is Test {
             if (!info.randomnessRequested) continue;
             uint256 snapshot = handler.randomnessRequestIdSnapshot(r);
             if (snapshot == 0) continue; // handler hasn't observed this one yet this run; nothing to compare
-            assertEq(info.randomnessRequestId, snapshot, "a round's successful randomness requestId must never change once set");
+            assertEq(
+                info.randomnessRequestId,
+                snapshot,
+                "a round's successful randomness requestId must never change once set"
+            );
         }
     }
 
@@ -279,6 +297,10 @@ contract FullSystemInvariantTest is Test {
     ///         the per-selector call-count table Foundry prints for the whole campaign, not
     ///         asserted inside this hook.
     function afterInvariant() public view {
-        assertGt(handler.allocatedRoundsCount(), 0, "coverage check: the campaign must have actually allocated at least one round");
+        assertGt(
+            handler.allocatedRoundsCount(),
+            0,
+            "coverage check: the campaign must have actually allocated at least one round"
+        );
     }
 }

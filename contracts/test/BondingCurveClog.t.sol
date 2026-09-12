@@ -35,10 +35,18 @@ contract BondingCurveClogTest is Test {
         token = new MemeToken("Cat", "CAT", address(this));
         virtualEthSeed = (5e9 * virtualTokenSeed) / 1e18; // P0 = 5e-9 ETH/token, scaled
 
-        EligibilityRegistry engine = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
 
         market = new BondingCurveClog(
-            address(token), address(tickerNFT), 1, multisig, winnerPot, governance, address(engine), virtualEthSeed, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            1,
+            multisig,
+            winnerPot,
+            governance,
+            address(engine),
+            virtualEthSeed,
+            BUFFER_BPS
         );
         token.setMarket(address(market));
         uint256 registeredId = engine.registerToken(address(market));
@@ -78,7 +86,9 @@ contract BondingCurveClogTest is Test {
         uint256 expectedMultisigFromTax = (expectedTax * 1000) / 10_000;
 
         assertEq(market.pendingWithdrawals(ticketOwner), expectedOwner, "ticker owner tax share credited");
-        assertGe(market.pendingWithdrawals(multisig), expectedMultisigFromTax, "multisig credited at least its tax share");
+        assertGe(
+            market.pendingWithdrawals(multisig), expectedMultisigFromTax, "multisig credited at least its tax share"
+        );
         assertGt(winnerPot.balance, 0, "winnerPot received something (pushed directly, not credited)");
 
         // Pull-payment: nothing actually moves until withdraw() is called.
@@ -109,9 +119,17 @@ contract BondingCurveClogTest is Test {
         MockTickerNFT tickerNFT2 = new MockTickerNFT();
         tickerNFT2.setOwner(1, address(badOwner));
         MemeToken token2 = new MemeToken("Dog", "DOG", address(this));
-        EligibilityRegistry engine2 = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine2 = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         BondingCurveClog market2 = new BondingCurveClog(
-            address(token2), address(tickerNFT2), 1, multisig, winnerPot, governance, address(engine2), virtualEthSeed, BUFFER_BPS
+            address(token2),
+            address(tickerNFT2),
+            1,
+            multisig,
+            winnerPot,
+            governance,
+            address(engine2),
+            virtualEthSeed,
+            BUFFER_BPS
         );
         token2.setMarket(address(market2));
         uint256 registeredId2 = engine2.registerToken(address(market2));
@@ -139,7 +157,7 @@ contract BondingCurveClogTest is Test {
         // Round-tripping immediately should cost a small, sane amount (tax + slippage + CLOG),
         // never a profit.
         assertLt(netEthOut, 0.05 ether, "round trip must not be profitable");
-        assertGt(netEthOut, 0.90 ether * 0.05 / 1, "round trip loss should be modest, not catastrophic");
+        assertGt(netEthOut, 0.9 ether * 0.05 / 1, "round trip loss should be modest, not catastrophic");
     }
 
     // ── CLOG mechanics ──────────────────────────────────────────────────────
@@ -161,9 +179,7 @@ contract BondingCurveClogTest is Test {
         vm.stopPrank();
 
         uint256 clogAfterRebuy = market.clogRemaining();
-        assertEq(
-            clogAfterRebuy, clogAfterFirstBuy, "re-buying within already-visited territory must release zero CLOG"
-        );
+        assertEq(clogAfterRebuy, clogAfterFirstBuy, "re-buying within already-visited territory must release zero CLOG");
     }
 
     function test_clog_freshBuyBeyondPriorHwm_releasesMore() public {

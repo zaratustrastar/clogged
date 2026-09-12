@@ -134,7 +134,7 @@ contract ClogRobinhoodForkTest is Test {
 
         // Full, real CLOG stack - identical to ClogV4Hook.t.sol's own setUp(), pointed at the
         // real PoolManager address instead of a freshly-deployed local one.
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(makeAddr("roundManager"));
         tickerNFT =
             new TickerNFT("PMFI Casino Tickers", "TICKER", address(this), "https://clog.run/api/ticker-metadata/");

@@ -39,6 +39,15 @@ export const env = {
   eligibilityRegistry: process.env.NEXT_PUBLIC_ELIGIBILITY_REGISTRY_ADDRESS || undefined,
   roundManager: process.env.NEXT_PUBLIC_ROUND_MANAGER_ADDRESS || undefined,
   rewardVault: process.env.NEXT_PUBLIC_REWARD_VAULT_ADDRESS || undefined,
+
+  // v4 trading path - see docs/V4_TRADING.md. All five must be present for the v4 path to be
+  // usable; isV4TradingConfigured below is the single place that decides this, so pages/hooks
+  // never have to re-derive that combined check themselves.
+  v4TradingEnabledFlag: process.env.NEXT_PUBLIC_V4_TRADING_ENABLED || undefined,
+  v4PoolManager: process.env.NEXT_PUBLIC_V4_POOL_MANAGER_ADDRESS || undefined,
+  universalRouter: process.env.NEXT_PUBLIC_UNIVERSAL_ROUTER_ADDRESS || undefined,
+  permit2: process.env.NEXT_PUBLIC_PERMIT2_ADDRESS || undefined,
+  clogV4Hook: process.env.NEXT_PUBLIC_CLOG_V4_HOOK_ADDRESS || undefined,
 } as const;
 
 /** True once every address + network variable needed to read real protocol
@@ -59,5 +68,19 @@ export const isProtocolConfigured = Boolean(
  * a project ID; without one, the Connect button should say so rather than
  * silently failing when clicked. */
 export const isWalletConfigured = Boolean(env.reownProjectId);
+
+/** True only when NEXT_PUBLIC_V4_TRADING_ENABLED="true" AND every address the v4 path needs is
+ * actually present. Deliberately conjunctive rather than trusting the flag alone: a canary
+ * rollout that flips the flag on before every address is wired should fail closed to the
+ * existing, proven direct BondingCurveClog path - never attempt a v4 trade with a missing
+ * address. TradeWidget and the v4 trade hooks check this single flag, not the flag string and
+ * the addresses separately. */
+export const isV4TradingConfigured = Boolean(
+  env.v4TradingEnabledFlag === "true" &&
+    env.v4PoolManager &&
+    env.universalRouter &&
+    env.permit2 &&
+    env.clogV4Hook
+);
 
 export const deploymentBlockBigInt = env.deploymentBlock ? BigInt(env.deploymentBlock) : 0n;

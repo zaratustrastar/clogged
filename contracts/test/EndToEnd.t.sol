@@ -38,8 +38,8 @@ contract EndToEndTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
-        rm = new RoundManager(address(engine), address(provider), governance);
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
+        rm = new RoundManager(address(engine), address(provider), governance, 3_600);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
 
@@ -62,14 +62,25 @@ contract EndToEndTest is Test {
     ///      second passing MemeToken's real address, then a one-time setMarket call) -- no address
     ///      prediction needed. Uses a MockTickerNFT (this is a lower-level integration test that
     ///      predates TickerRegistry -- the full commit-reveal launch flow gets its own tests).
-    function _launchMeme(string memory name, string memory symbol) internal returns (uint256 tokenId, MemeToken token, BondingCurveClog curve) {
+    function _launchMeme(string memory name, string memory symbol)
+        internal
+        returns (uint256 tokenId, MemeToken token, BondingCurveClog curve)
+    {
         uint256 predictedTokenId = engine.nextTokenId();
         MockTickerNFT tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(predictedTokenId, ticketOwner);
 
         token = new MemeToken(name, symbol, address(this));
         curve = new BondingCurveClog(
-            address(token), address(tickerNFT), predictedTokenId, multisig, address(vault), governance, address(engine), VIRTUAL_ETH_SEED, BUFFER_BPS
+            address(token),
+            address(tickerNFT),
+            predictedTokenId,
+            multisig,
+            address(vault),
+            governance,
+            address(engine),
+            VIRTUAL_ETH_SEED,
+            BUFFER_BPS
         );
         token.setMarket(address(curve));
         tokenId = engine.registerToken(address(curve));
@@ -97,7 +108,7 @@ contract EndToEndTest is Test {
         engine.onTrade(fishId);
 
         // Hold for the required sustained duration.
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2); // 30 minutes in, well before round 1 closes
+        vm.warp(roundOpen + rm.roundDuration() / 2); // 30 minutes in, well before round 1 closes
 
         // A confirming touch after the 30-minute mark is what actually locks in qualification --
         // any ordinary trade or explicit `qualify` call works; using `qualify` here to demonstrate
@@ -114,7 +125,7 @@ contract EndToEndTest is Test {
 
         // Round 1 closes -- this is the very first round the protocol ever opened, and it draws
         // from its OWN candidates (no lag), so it can settle immediately.
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         uint256 closedRound = _closeRound();
         assertEq(closedRound, 1);
         RoundManager.RoundInfo memory info = rm.getRound(1);
@@ -178,12 +189,12 @@ contract EndToEndTest is Test {
         market3.buy{value: 5 ether}(0, block.timestamp);
         engine.onTrade(id3);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2);
+        vm.warp(roundOpen + rm.roundDuration() / 2);
         engine.qualify(catId);
         engine.qualify(id2);
         engine.qualify(id3);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         _closeRound(); // round 1 closes and settles immediately -- no lag
         RoundManager.RoundInfo memory info = rm.getRound(1);
 
@@ -211,7 +222,11 @@ contract EndToEndTest is Test {
         catMarket.buy{value: 0.5 ether}(0, block.timestamp);
 
         // Alice's claim must be COMPLETELY UNCHANGED by Bob's late trade.
-        assertEq(vault.previewClaim(1, alice), precomputedClaim, "late trading must not alter an already-fixed round's claims");
+        assertEq(
+            vault.previewClaim(1, alice),
+            precomputedClaim,
+            "late trading must not alter an already-fixed round's claims"
+        );
         assertEq(vault.previewClaim(1, bob), 0, "bob's late buy earns nothing from round 1's already-closed window");
     }
 
@@ -235,11 +250,11 @@ contract EndToEndTest is Test {
         market3.buy{value: 5 ether}(0, block.timestamp);
         engine.onTrade(id3);
 
-        vm.warp(roundOpen + rm.ROUND_DURATION() / 2);
+        vm.warp(roundOpen + rm.roundDuration() / 2);
         engine.qualify(catId);
         engine.qualify(id2);
         engine.qualify(id3);
-        vm.warp(roundOpen + rm.ROUND_DURATION());
+        vm.warp(roundOpen + rm.roundDuration());
         _closeRound(); // round 1 closes and settles immediately -- no lag
         RoundManager.RoundInfo memory info = rm.getRound(1);
 
@@ -267,7 +282,9 @@ contract EndToEndTest is Test {
         require(ok);
 
         RewardVault.RoundAllocation memory allocAfter = vault.getAllocation(1);
-        assertEq(allocAfter.jackpotAmount, frozenJackpot, "an already-closed round's jackpot must never retroactively change");
+        assertEq(
+            allocAfter.jackpotAmount, frozenJackpot, "an already-closed round's jackpot must never retroactively change"
+        );
 
         // The late revenue instead sits in the live pool, ready for whichever round allocates next.
         assertEq(vault.unallocatedPool(), 5 ether);
