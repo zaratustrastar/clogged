@@ -25,6 +25,11 @@ contract RunCaller {
     }
 }
 
+/// @notice Verifies the final governance topology: the Safe is treasury/fee-recipient ONLY (no
+///         timelock role whatsoever); the sole PROPOSER_ROLE and CANCELLER_ROLE belong to an
+///         explicit, required GOVERNANCE_PROPOSER_ADDRESS env var, never inferred from
+///         msg.sender/Foundry broadcast behavior; the executor stays open; the timelock still
+///         self-administers; and none of this depends on which nonzero delay is configured.
 contract DeployRobinhoodChainTimelockTest is Test {
     // Foundry's well-known default broadcast sender, used when vm.startBroadcast() is called
     // with no explicit address - observed directly via a full trace (forge test -vvvv), not
@@ -32,7 +37,7 @@ contract DeployRobinhoodChainTimelockTest is Test {
     address constant DEFAULT_BROADCAST_SENDER = 0x1804c8AB1F12E6bbf3894d4083f33e07309d1f38;
 
     address safe = makeAddr("safe");
-    address multisig = makeAddr("feeMultisig");
+    address governanceProposer = makeAddr("governanceProposer");
     address ccipRouter = makeAddr("ccipRouter");
     RunCaller runCaller;
 
@@ -58,19 +63,42 @@ contract DeployRobinhoodChainTimelockTest is Test {
     function _setCommonEnv() internal {
         vm.setEnv("CCIP_ROUTER_ROBINHOOD", vm.toString(ccipRouter));
         vm.setEnv("ARBITRUM_CHAIN_SELECTOR", vm.toString(uint256(4949039107694359620)));
+        // The Safe is used as both SAFE_ADDRESS and FEE_MULTISIG_ADDRESS - the script's own
+        // _verify() now requires these to be the same address (Safe = fee recipient only).
         vm.setEnv("SAFE_ADDRESS", vm.toString(safe));
-        vm.setEnv("FEE_MULTISIG_ADDRESS", vm.toString(multisig));
+        vm.setEnv("FEE_MULTISIG_ADDRESS", vm.toString(safe));
+        vm.setEnv("GOVERNANCE_PROPOSER_ADDRESS", vm.toString(governanceProposer));
         vm.setEnv("TICKER_NFT_BASE_URI", "https://clog.run/api/ticker-metadata/");
     }
 
-    function test_missingTimelockDelayEnvVar_revertsLoudly_notSilentDefault() public {
+    function test_missingGovernanceProposerEnvVar_revertsLoudly_notSilentDefault() public {
         _setCommonEnv();
-        // TIMELOCK_DELAY_SECONDS deliberately not set.
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        // Explicitly overwritten to an empty (unparseable) value rather than left merely unset:
+        // vm.setEnv() has no corresponding "unset" cheatcode in this forge-std version, and env
+        // vars set via vm.setEnv() are process-level state that persists across every test
+        // function in this suite - relying on "no earlier test happened to set this" would be
+        // order-dependent and unreliable. An empty string still forces vm.envAddress's own
+        // parse-failure revert (verified directly: vm.envAddress reverts with a parser error on
+        // an empty string, the same as it does when the variable was genuinely never set),
+        // regardless of what any other test already set this to.
+        vm.setEnv("GOVERNANCE_PROPOSER_ADDRESS", "");
         DeployRobinhoodChain deployer = new DeployRobinhoodChain();
         vm.expectRevert();
         runCaller.callRun(deployer);
     }
 
+    function test_missingTimelockDelayEnvVar_revertsLoudly_notSilentDefault() public {
+        _setCommonEnv();
+        // Same reasoning as above - explicitly forced to an unparseable value rather than
+        // relying on this variable having never been set by an earlier test in this suite.
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert();
+        runCaller.callRun(deployer);
+    }
+
+    // 1. zero-delay deployment gives getMinDelay() == 0
     function test_zeroDelay_timelockDeploysWithZeroMinDelay() public {
         _setCommonEnv();
         vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
@@ -80,48 +108,63 @@ contract DeployRobinhoodChainTimelockTest is Test {
         assertEq(d.timelock.getMinDelay(), 0, "min delay must be exactly 0");
     }
 
-    function test_zeroDelay_safeIsProposer() public {
+    // 2 & 3. deployer/operator address has PROPOSER_ROLE and CANCELLER_ROLE
+    function test_governanceProposer_holdsProposerAndCancellerRole() public {
         _setCommonEnv();
         vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
         DeployRobinhoodChain deployer = new DeployRobinhoodChain();
         DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
 
-        assertTrue(d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), safe), "Safe must hold proposer role");
+        assertTrue(
+            d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), governanceProposer),
+            "governance proposer must hold proposer role"
+        );
+        assertTrue(
+            d.timelock.hasRole(d.timelock.CANCELLER_ROLE(), governanceProposer),
+            "governance proposer must hold canceller role"
+        );
     }
 
-    function test_zeroDelay_deployerIsNotProposerOrAdmin() public {
-        _setCommonEnv();
-        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
-        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
-        // DEFAULT_BROADCAST_SENDER is the real deployer here - the exact address the script's
-        // own outgoing calls (and thus its constructor arguments) actually resolve to - and the
-        // one that must hold no governance privilege.
-        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
-
-        assertFalse(
-            d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), DEFAULT_BROADCAST_SENDER), "deployer must not be proposer"
-        );
-        assertFalse(
-            d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), DEFAULT_BROADCAST_SENDER), "deployer must not be executor"
-        );
-        assertFalse(
-            d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), DEFAULT_BROADCAST_SENDER), "deployer must not be admin"
-        );
-        // Nobody holds admin - the timelock self-administers, not even the Safe.
-        assertFalse(d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), safe), "even the Safe must not be admin");
-    }
-
-    function test_zeroDelay_governanceIsTheTimelockAddress_everywhere() public {
+    // 4. Safe has neither proposer nor canceller role
+    function test_safe_holdsNoProposerOrCancellerRole() public {
         _setCommonEnv();
         vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
         DeployRobinhoodChain deployer = new DeployRobinhoodChain();
         DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
 
-        assertEq(d.roundManager.governance(), address(d.timelock), "RoundManager governance must be the timelock");
-        assertEq(d.randomnessProvider.governance(), address(d.timelock), "provider governance must be the timelock");
-        assertEq(d.tickerRegistry.governance(), address(d.timelock), "TickerRegistry governance must be the timelock");
+        assertFalse(d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), safe), "Safe must NOT hold proposer role");
+        assertFalse(d.timelock.hasRole(d.timelock.CANCELLER_ROLE(), safe), "Safe must NOT hold canceller role");
     }
 
+    // 5. neither deployer nor Safe has DEFAULT_ADMIN_ROLE
+    function test_neitherGovernanceProposerNorSafe_holdsAdminRole() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+
+        assertFalse(
+            d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), governanceProposer),
+            "governance proposer must not hold admin role"
+        );
+        assertFalse(d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), safe), "Safe must not hold admin role");
+    }
+
+    // 6. open executor remains configured
+    function test_openExecutor_remainsConfigured() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+
+        // "Granting a role to address(0) is equivalent to enabling this role for everyone" -
+        // TimelockController's own onlyRoleOrOpenRole doc comment, confirmed directly in the
+        // vendored source rather than assumed.
+        assertTrue(d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), address(0)), "executor must remain open");
+    }
+
+    // 7. a governed action can be scheduled by the deployer and executed immediately with zero
+    //    elapsed time
     function test_zeroDelay_scheduledActionExecutesImmediately_noWaitRequired() public {
         _setCommonEnv();
         vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
@@ -136,15 +179,54 @@ contract DeployRobinhoodChainTimelockTest is Test {
         // d.timelock.getMinDelay() as part of building schedule()'s own argument list
         // would itself be that next call, consuming the prank before schedule() ever runs.
         uint256 configuredDelay = d.timelock.getMinDelay();
-        vm.prank(safe);
+        vm.prank(governanceProposer);
         d.timelock.schedule(address(d.roundManager), 0, callData, bytes32(0), salt, configuredDelay);
 
         // The critical proof: execute in the SAME block, with zero time elapsed - no vm.warp()
-        // anywhere in this test. If the configured delay were anything other than genuinely zero,
-        // this execute() call would revert with TimelockUnexpectedOperationState.
+        // (beyond setUp's own one-time warp) anywhere in this test. If the configured delay
+        // were anything other than genuinely zero, this execute() call would revert with
+        // TimelockUnexpectedOperationState.
         d.timelock.execute(address(d.roundManager), 0, callData, bytes32(0), salt);
 
         assertEq(address(d.roundManager.rewardVault()), address(d.rewardVault), "action must have actually executed");
+    }
+
+    // 7 (negative control). the Safe cannot schedule anything - it holds no proposer role
+    function test_safe_cannotScheduleAnAction() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+
+        bytes memory callData = abi.encodeCall(RoundManager.setRewardVault, (address(d.rewardVault)));
+        uint256 configuredDelay = d.timelock.getMinDelay();
+
+        vm.prank(safe);
+        vm.expectRevert();
+        d.timelock.schedule(address(d.roundManager), 0, callData, bytes32(0), bytes32(uint256(99)), configuredDelay);
+    }
+
+    // 8. the Safe remains the fee recipient passed to TickerRegistry
+    function test_safe_remainsTheFeeRecipientOnTickerRegistry() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+
+        assertEq(d.tickerRegistry.multisig(), safe, "Safe must remain the fee recipient wired into TickerRegistry");
+    }
+
+    // 9. RoundManager, randomness provider and TickerRegistry governance still point to the
+    //    Timelock
+    function test_zeroDelay_governanceIsTheTimelockAddress_everywhere() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+
+        assertEq(d.roundManager.governance(), address(d.timelock), "RoundManager governance must be the timelock");
+        assertEq(d.randomnessProvider.governance(), address(d.timelock), "provider governance must be the timelock");
+        assertEq(d.tickerRegistry.governance(), address(d.timelock), "TickerRegistry governance must be the timelock");
     }
 
     function test_nonzeroDelay_stillEnforcesTheConfiguredWait() public {
@@ -159,7 +241,7 @@ contract DeployRobinhoodChainTimelockTest is Test {
         bytes32 salt = bytes32(uint256(2));
 
         uint256 configuredDelay2 = d.timelock.getMinDelay();
-        vm.prank(safe);
+        vm.prank(governanceProposer);
         d.timelock.schedule(address(d.roundManager), 0, callData, bytes32(0), salt, configuredDelay2);
 
         // Executing immediately must still fail for a genuinely nonzero delay.

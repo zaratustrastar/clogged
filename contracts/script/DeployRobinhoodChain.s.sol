@@ -17,11 +17,35 @@ import {ChainlinkRandomnessProvider} from "../src/ChainlinkRandomnessProvider.so
 ///         VRFWrapperOnArbitrum (separate chain, separate script -- see
 ///         DeployArbitrumWrapper.s.sol) or a Safe (Safe multisigs are created via Safe's own
 ///         infrastructure/UI, not custom Solidity -- this script only takes an already-created
-///         Safe's address as config and wires it in as the timelock's proposer).
+///         Safe's address as config and wires it in purely as the protocol fee recipient; the
+///         Safe holds no timelock role at all -- see the governance-topology note below).
 ///
 /// @dev ALL CHAIN-SPECIFIC/EXTERNAL ADDRESSES COME FROM ENVIRONMENT VARIABLES, never hardcoded
 ///      here: CCIP router, Arbitrum chain selector, the Safe address, curve config, etc. This
 ///      keeps deployment config separate from contract/script source.
+///
+/// @dev GOVERNANCE TOPOLOGY: the Safe is treasury/fee-recipient ONLY -- it holds no timelock
+///      role whatsoever. The sole Timelock PROPOSER_ROLE (and, since OpenZeppelin's
+///      TimelockController constructor grants both to every address in the `proposers` array --
+///      confirmed directly in the vendored source, not assumed -- CANCELLER_ROLE too) belongs to
+///      GOVERNANCE_PROPOSER_ADDRESS, an explicit, required env var -- never inferred from
+///      msg.sender/Foundry's own broadcast-sender behavior, which would silently grant this
+///      privilege to whichever address happens to sign the deployment transaction rather than a
+///      deliberately chosen operator address. Executor stays open (address(0) grant -- "Granting
+///      a role to address(0) is equivalent to enabling this role for everyone," per
+///      TimelockController's own onlyRoleOrOpenRole doc comment), and the timelock still
+///      self-administers (admin = address(0) passed to the constructor; DEFAULT_ADMIN_ROLE is
+///      granted only to the timelock contract itself, confirmed directly in the vendored
+///      constructor). Neither the Safe nor the governance proposer ever holds admin.
+///
+/// @dev TIMELOCK DELAY IS DEPLOYMENT-CONFIGURABLE, READ FROM TIMELOCK_DELAY_SECONDS (required, no
+///      default -- vm.envUint reverts loudly if this isn't set, verified directly rather than
+///      assumed). Setting TIMELOCK_DELAY_SECONDS=0 removes the WAIT, not the PROCESS: every
+///      action still requires the governance proposer to schedule it and still passes through
+///      the same schedule/execute mechanism -- it just becomes executable immediately rather
+///      than after a fixed delay. The delay can be changed later via
+///      TimelockController.updateDelay(newDelay), itself a timelocked governance action gated by
+///      the currently configured delay.
 ///
 /// @dev GOVERNANCE IS SET AT CONSTRUCTION, WITH NO TRANSFER PATH AFTERWARD (by design -- see
 ///      RoundManager/BondingCurveClog: `governance` is assigned once in the constructor and never
@@ -33,22 +57,8 @@ import {ChainlinkRandomnessProvider} from "../src/ChainlinkRandomnessProvider.so
 ///      (RoundManager.setRewardVault, ChainlinkRandomnessProvider.setWrapper) must go through the
 ///      real timelock process from the very first deployment, with no special-cased bypass. This
 ///      script deploys everything and VERIFIES the parts that don't need governance, then logs the
-///      exact governance actions (target, calldata) the Safe must queue next -- it does not
-///      attempt to execute or simulate them, since a real Safe requires actual multisig approval
-///      this script cannot produce.
-///
-/// @dev TIMELOCK DELAY IS DEPLOYMENT-CONFIGURABLE, READ FROM TIMELOCK_DELAY_SECONDS (required, no
-///      default -- vm.envUint reverts loudly if this isn't set, verified directly rather than
-///      assumed). The governance TOPOLOGY never changes regardless of the configured value: the
-///      Safe is always the sole proposer, the executor is always open (address(0) -- anyone may
-///      execute an already-queued, already-elapsed action), the timelock always self-administers
-///      (admin = address(0), so no EOA or even the Safe can bypass or reduce the delay outside the
-///      timelock's own governed process), and the deployer never holds any timelock role. Setting
-///      TIMELOCK_DELAY_SECONDS=0 removes the WAIT, not the PROCESS: every action still requires a
-///      real Safe multisig approval to propose and still passes through the same schedule/execute
-///      mechanism -- it just becomes executable immediately rather than after a fixed delay. The
-///      delay can be changed later via TimelockController.updateDelay(newDelay), itself a
-///      timelocked governance action gated by the currently configured delay.
+///      exact governance actions (target, calldata) the governance proposer must schedule next --
+///      it does not attempt to schedule or execute them itself.
 contract DeployRobinhoodChain is Script {
     // Config G curve parameters (see architecture docs) -- override via env if a different curve
     // config is ever selected for a given deployment.
@@ -69,22 +79,27 @@ contract DeployRobinhoodChain is Script {
     function run() external returns (Deployment memory d) {
         address ccipRouter = vm.envAddress("CCIP_ROUTER_ROBINHOOD");
         uint64 arbitrumChainSelector = uint64(vm.envUint("ARBITRUM_CHAIN_SELECTOR"));
+        // Treasury/fee recipient ONLY -- never wired into any timelock role below.
         address safe = vm.envAddress("SAFE_ADDRESS");
         address multisig = vm.envAddress("FEE_MULTISIG_ADDRESS"); // 10% trading-tax/launch-fee recipient
         string memory tickerNFTBaseURI = vm.envString("TICKER_NFT_BASE_URI");
         // Required, no default: an operator who forgets to set this gets a clear revert here,
         // never a silent 48-hour (or any other unintended) delay.
         uint256 timelockDelay = vm.envUint("TIMELOCK_DELAY_SECONDS");
+        // The sole Timelock proposer/canceller -- an explicit, required env var, never
+        // msg.sender. See the contract-level governance-topology note above for why.
+        address governanceProposer = vm.envAddress("GOVERNANCE_PROPOSER_ADDRESS");
 
         vm.startBroadcast();
 
         // Timelock first: it becomes "governance" for everything deployed after it. Admin role
-        // is address(0) -- the timelock self-administers, so no single EOA or even the Safe can
-        // bypass the configured delay to change who may propose/execute. Executors = address(0)
-        // means anyone may execute an already-queued, already-delayed action -- purely mechanical
-        // once public and pending, so permissionless execution costs nothing in safety.
+        // is address(0) -- the timelock self-administers, so no single EOA or even the governance
+        // proposer can bypass the configured delay to change who may propose/execute. Executors =
+        // address(0) means anyone may execute an already-queued, already-delayed action --
+        // purely mechanical once public and pending, so permissionless execution costs nothing
+        // in safety.
         address[] memory proposers = new address[](1);
-        proposers[0] = safe;
+        proposers[0] = governanceProposer;
         address[] memory executors = new address[](1);
         executors[0] = address(0);
         d.timelock = new TimelockController(timelockDelay, proposers, executors, address(0));
@@ -159,13 +174,49 @@ contract DeployRobinhoodChain is Script {
             d.timelock.getMinDelay() == vm.envUint("TIMELOCK_DELAY_SECONDS"),
             "timelock delay must match the configured TIMELOCK_DELAY_SECONDS"
         );
+
+        address governanceProposer = vm.envAddress("GOVERNANCE_PROPOSER_ADDRESS");
+        address safeAddr = vm.envAddress("SAFE_ADDRESS");
+
+        // The governance proposer holds exactly proposer + canceller -- never executor
+        // (individually; the open address(0) grant below covers everyone including this address,
+        // so it never needs its own explicit grant) and never admin.
         require(
-            d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), vm.envAddress("SAFE_ADDRESS")),
-            "Safe must hold proposer role"
+            d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), governanceProposer),
+            "governance proposer must hold proposer role"
         );
-        require(!d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), msg.sender), "deployer must not hold proposer role");
-        require(!d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), msg.sender), "deployer must not hold executor role");
-        require(!d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), msg.sender), "deployer must not hold admin role");
+        require(
+            d.timelock.hasRole(d.timelock.CANCELLER_ROLE(), governanceProposer),
+            "governance proposer must hold canceller role"
+        );
+        require(
+            !d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), governanceProposer),
+            "governance proposer must not individually hold executor role"
+        );
+        require(
+            !d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), governanceProposer),
+            "governance proposer must not hold admin role"
+        );
+
+        // The Safe is treasury/fee-recipient ONLY -- confirmed to hold zero timelock privilege.
+        require(!d.timelock.hasRole(d.timelock.PROPOSER_ROLE(), safeAddr), "Safe must NOT hold proposer role");
+        require(!d.timelock.hasRole(d.timelock.CANCELLER_ROLE(), safeAddr), "Safe must NOT hold canceller role");
+        require(!d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), safeAddr), "Safe must NOT hold executor role");
+        require(!d.timelock.hasRole(d.timelock.DEFAULT_ADMIN_ROLE(), safeAddr), "Safe must NOT hold admin role");
+
+        // Open executor: granting EXECUTOR_ROLE to address(0) is what makes execution
+        // permissionless for everyone (see TimelockController's own onlyRoleOrOpenRole doc
+        // comment) -- confirmed directly rather than inferred from any single address's own role.
+        require(d.timelock.hasRole(d.timelock.EXECUTOR_ROLE(), address(0)), "executor must remain open");
+
+        // Fee recipient invariant: the Safe passed in as FEE_MULTISIG_ADDRESS is the exact
+        // address TickerRegistry actually pays -- the one privilege the Safe is meant to have.
+        require(
+            safeAddr == vm.envAddress("FEE_MULTISIG_ADDRESS"),
+            "SAFE_ADDRESS and FEE_MULTISIG_ADDRESS must be the same address"
+        );
+        require(d.tickerRegistry.multisig() == safeAddr, "Safe must be the fee recipient wired into TickerRegistry");
+
         require(d.engine.roundManager() == address(d.roundManager), "engine's one-time RoundManager wiring incomplete");
         require(
             d.randomnessProvider.roundManager() == address(d.roundManager),
@@ -207,7 +258,7 @@ contract DeployRobinhoodChain is Script {
     ///      propose -> configured delay -> execute path. This just tells the operator exactly
     ///      what to queue; it does not (and cannot) queue or execute anything itself.
     function _logRequiredGovernanceActions(Deployment memory d) internal view {
-        console2.log("=== Required governance actions (queue via the Safe, through the timelock) ===");
+        console2.log("=== Required governance actions (queue via the governance proposer, through the timelock) ===");
         console2.log("1) RoundManager.setRewardVault(rewardVault) -- target:", address(d.roundManager));
         console2.logBytes(abi.encodeCall(RoundManager.setRewardVault, (address(d.rewardVault))));
         console2.log(
