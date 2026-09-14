@@ -55,15 +55,24 @@ Plus, still an environment variable (unchanged):
 4. **Regenerate anything address-specific** — nothing to regenerate. ABIs
    are keyed by contract *shape*, not address (see
    `lib/web3/abis/README.md`) — they don't change when addresses change.
-5. **VPS pull/build/restart** — see `VPS_RUNBOOK.md`'s standard update
-   sequence: `git pull origin main`, `npm ci` only if dependencies changed,
-   `npm run build` (required — the manifest is baked in at build time,
-   exactly like `NEXT_PUBLIC_*` values, see `.env.production.example`'s own
-   header for why a restart alone is never enough), `systemctl restart
-   clog`. If only the Reown project ID changed (an actual env var), the
-   same build+restart sequence is still simplest and always correct.
+5. **VPS pull/build/restart** — for an ordinary manifest/address update
+   with NO accompanying breaking DB migration, see `VPS_RUNBOOK.md`'s
+   standard update sequence: `git pull origin main`, `npm ci` only if
+   dependencies changed, `npm run build` (required — the manifest is
+   baked in at build time, exactly like `NEXT_PUBLIC_*` values, see
+   `.env.production.example`'s own header for why a restart alone is
+   never enough), `systemctl restart clog`. **If the update also includes
+   a migration that changes an existing table in a way the currently-
+   running old code doesn't write compatibly with (this canary rollout's
+   own migration 002 is exactly this case), use VPS_RUNBOOK.md's
+   dedicated "Deployments with a breaking DB migration" section instead**
+   — building before migrating, and migrating only while the app is
+   stopped, so there is no window where the old app runs against the new
+   schema.
 
 ## Sanity check after going live
+
+For an ordinary update (no breaking migration):
 
 ```bash
 cd /opt/clogged
@@ -72,11 +81,19 @@ npm ci   # only if package.json/package-lock.json changed
 sudo -u clog npm run build
 sudo systemctl restart clog
 curl -s https://clog.run/api/health
-curl -s https://clog.run/api/ticker-metadata/1   # 404 until a real token 1 exists on THIS deployment - expected
+curl -s https://clog.run/api/ticker-metadata/1   # legacy HOOD (tokenId 1 = HOOD, already launched) - expect real metadata, NOT 404
 ```
 
 Then load `https://clog.run` in a browser: the "Protocol contracts not
 configured yet" messaging (in `TokenTable`, `TokenDetailPage`, `LaunchPage`,
 etc.) should be gone, replaced by real onchain reads against the new
 deployment.
+
+For a deployment that includes a breaking DB migration (this canary
+rollout's own migration 002), do NOT use the sequence above — see
+`VPS_RUNBOOK.md`'s "Deployments with a breaking DB migration" section for
+the exact build-first, stop/migrate/start sequence and its own rollback
+procedure, and run all four of that section's smoke tests (health, legacy
+HOOD metadata, canary metadata, canary artwork) — not just the two shown
+above.
 

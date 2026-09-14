@@ -111,11 +111,19 @@ curl -sI https://clog.run/uploads/test.txt | head -5   # expect 404 now
 
 ## Standard update sequence
 
-Covers both code changes and deployment-manifest changes (see
-`docs/DEPLOYMENTS.md` — switching which contracts `clog.run` points at is
-now just an edit to `deployments/robinhood-mainnet.json`, committed like any
-other code change, picked up by this exact same `git pull` + build +
-restart sequence):
+Covers ordinary code changes and deployment-manifest changes that do NOT
+include a breaking DB schema migration (see `docs/DEPLOYMENTS.md` —
+switching which contracts `clog.run` points at is normally just an edit to
+`deployments/robinhood-mainnet.json`, committed like any other code
+change, picked up by this exact same `git pull` + build + restart
+sequence). **If the update includes a migration that changes an existing
+table's columns/constraints in a way the currently-running old code
+doesn't write compatibly with (exactly the case for migration 002 - see
+"Deployments with a breaking DB migration" below), do NOT use this
+sequence** - `migrate` running before `restart` leaves the old app
+running against the new, incompatible schema for the entire build
+window, and its own writes will start failing immediately once the
+migration completes, not just risk failing:
 
 ```bash
 cd /opt/clogged
@@ -148,6 +156,110 @@ sudo systemctl restart clog
 sudo systemctl status clog
 ```
 
+## Deployments with a breaking DB migration (this canary rollout)
+
+`lib/db/migrations/002_deployment_scoped_token_profiles.sql` makes
+`chain_id`/`ticker_registry_address` `NOT NULL` and replaces
+`token_profiles`'s primary key with a composite one. The currently-running
+old app's own `INSERT ... ON CONFLICT (token_id) DO UPDATE` (see
+`lib/metadata/PostgresTokenProfileStore.ts` on `main`) never sets those
+two columns and targets `ON CONFLICT (token_id)` specifically - once this
+migration is applied, that statement fails outright (`null value in
+column "chain_id" violates not-null constraint`, and separately, `there is
+no unique or exclusion constraint matching the ON CONFLICT specification`,
+since `token_id` alone is no longer a unique constraint after the PK
+change). This is a hard failure the instant the migration completes, not
+a mere compatibility risk - so `migrate` must never run while the old app
+is still serving traffic, and `build` must never run while blocking a
+schema cutover that's waiting on it.
+
+**Sequence - build first, migrate+restart together, minimal stop window:**
+
+```bash
+cd /opt/clogged
+
+# 1. Pull the new source - the currently-running OLD compiled app (.next/
+#    from its own prior build) keeps serving correctly throughout this
+#    step and the next one: Node already has the old code loaded in
+#    memory: overwriting source files on disk does not affect a process
+#    that already started.
+git pull origin main
+
+# (npm ci only if package.json/package-lock.json changed - it hasn't in
+# this rollout's diff)
+npm ci
+
+# 2. Build the NEW app while the OLD app is still running and still
+#    serving all traffic correctly. This is the step that used to run
+#    AFTER migrate - moving it first is the actual fix: the build window
+#    (which can take real time) no longer overlaps with any schema change
+#    at all.
+sudo -u clog npm run build
+
+# 3. Optional but recommended: back up the DB before any schema change,
+#    and confirm connectivity/read access first.
+sudo -u clog pg_dump -Fc clog > /var/backups/clog-pre-migration-002-$(date +%Y%m%d%H%M%S).dump
+psql -U clogapp -d clog -c "SELECT count(*) FROM token_profiles;"   # read-only sanity check
+
+# 4. Stop the app. This IS the downtime window - old app writes cannot
+#    fail against a schema it never sees, because it isn't running.
+sudo systemctl stop clog
+
+# 5. Run the migration now, with no app running at all.
+sudo -u clog node --env-file=.env.production scripts/migrate.mjs
+# CHECK THE EXIT CODE before doing anything else:
+echo "migration exit code: $?"
+
+# 6. Only if step 5 succeeded (exit code 0): start the app immediately -
+#    it's already built from step 2, so this is just a process start, not
+#    a rebuild. The gap between "schema changed" and "compatible app
+#    running" is just this one command.
+sudo systemctl start clog
+sudo systemctl status clog
+
+# 7. Health + metadata smoke tests - see below.
+```
+
+**If migration (step 5) fails:** do NOT run step 6. The app is currently
+stopped (real downtime, but a safe state - no code is running against a
+half-migrated or mismatched schema). Recovery:
+1. Inspect the actual error from `scripts/migrate.mjs`'s own output.
+2. If the migration is safe to retry (e.g. a transient DB connection
+   issue, not a real schema conflict), fix the cause and re-run step 5.
+3. If it must be rolled back: migration 002 is reversible by hand (it
+   only adds two columns and changes the PK - see the exact reverse SQL
+   in `docs/DEPLOYMENTS.md`'s rollback note, or run:
+   ```sql
+   ALTER TABLE token_profiles DROP CONSTRAINT token_profiles_pkey;
+   ALTER TABLE token_profiles ADD PRIMARY KEY (token_id);
+   ALTER TABLE token_profiles ALTER COLUMN chain_id DROP NOT NULL;
+   ALTER TABLE token_profiles ALTER COLUMN ticker_registry_address DROP NOT NULL;
+   ```
+   or restore the pre-migration backup from step 3:
+   `pg_restore -d clog --clean /var/backups/clog-pre-migration-002-<timestamp>.dump`)
+4. Once the schema is confirmed back to its pre-migration shape, start
+   the OLD app: `git checkout main` (or whatever commit was running
+   before this rollout), `npm ci`, `sudo -u clog npm run build`,
+   `sudo systemctl start clog`. This full rebuild is the cost of a true
+   rollback after step 1 already pulled new source - there is no shortcut
+   that avoids it once the working tree has moved past the old commit.
+
+**If the app fails to start (step 6) after a SUCCESSFUL migration:** the
+schema is now the new schema, and the new app's own code is what's
+compatible with it - rolling back to the OLD app code without also
+reverting the migration would immediately hit the exact same failure
+this whole procedure exists to avoid. Recovery:
+1. Check `sudo systemctl status clog` and `sudo journalctl -u clog -n 100`
+   for the real startup error.
+2. Prefer fixing forward (the new code is correct for the new schema;
+   most startup failures here are config issues - a missing/wrong env
+   var, a permissions problem - not the migration itself).
+3. Only if a full rollback is truly necessary: revert the migration by
+   hand (SQL above) or restore the backup, THEN checkout the old commit,
+   rebuild, and start the old app - the same full procedure as the
+   migration-failure case above, since both end in the same state
+   (pre-migration schema, pre-rollout code).
+
 ## Health verification
 
 ```bash
@@ -164,11 +276,56 @@ Also worth a quick manual check after any real config change:
 
 ```bash
 curl -sI https://clog.run/ | head -5          # 200, real headers
-curl -s https://clog.run/api/ticker-metadata/1 # 404 until token 1 is actually launched
+curl -s https://clog.run/api/ticker-metadata/1 # legacy HOOD (tokenId 1 = HOOD, already launched) - expect real metadata, NOT 404
 curl -sI https://clog.run/uploads/ | head -5   # 403/404 expected (no index, no such path) - confirms Nginx is serving this location at all
 ```
 
+**Smoke tests specific to this canary rollout** (run these after any
+deployment that includes migration 002 and points the manifest at the
+canary deployment):
+
+```bash
+# 1. Basic health
+curl -s https://clog.run/api/health | python3 -m json.tool
+# expect {"status": "ok", "database": "connected", ...}
+
+# 2. Legacy HOOD metadata - permanently bound to LEGACY_HOOD_DEPLOYMENT,
+#    unaffected by which deployment the manifest's active config points
+#    at. tokenId 1 = HOOD, already launched - expect real metadata, NOT 404.
+curl -s https://clog.run/api/ticker-metadata/1 | python3 -m json.tool
+# expect: "name": "$HOOD — CLOG Ticker" (or similar), NOT an error object
+
+# 3. Canary metadata - canary tokenId 1 = CNRYA, already launched on the
+#    verified deployment. Resolves via getKnownDeploymentById("canary-v1"),
+#    which derives from the manifest - expect real metadata, NOT 404.
+curl -s https://clog.run/api/ticker-metadata/canary-v1/1 | python3 -m json.tool
+# expect: "name": "$CNRYA — CLOG Ticker" (or similar), attributes include
+# {"trait_type": "Deployment", "value": "canary-v1"}, NOT an error object
+
+# 4. Canary artwork - same tokenId, deployment-scoped image route
+curl -sI https://clog.run/api/ticker-image/canary-v1/1 | head -5
+# expect: 200, Content-Type: image/svg+xml
+```
+
+If any of tests 2-4 returns 404 or an error object where real metadata is
+expected, do not assume the rollout is broken before checking: (a) did
+migration 002 actually run and succeed (test 1's `database: "connected"`
+only confirms connectivity, not that this specific migration applied -
+`psql -c "\d token_profiles"` to confirm the composite primary key
+exists), and (b) does `deployments/robinhood-mainnet.json` on the running
+commit actually have the real, non-placeholder canary TickerRegistry
+address (it does as of this rollout's own commit - this check is for
+future deployments that might reuse this runbook section).
+
 ## Rollback
+
+**If this deployment included migration 002 (or any other breaking
+schema change), the generic rollback below is NOT sufficient by itself**
+— reverting the app code without also reverting the DB schema leaves the
+old code running against a schema its own queries are incompatible with,
+which is the exact failure mode the "Deployments with a breaking DB
+migration" section above exists to prevent. Use that section's own
+rollback procedure instead when a schema migration is involved.
 
 ```bash
 cd /opt/clogged
