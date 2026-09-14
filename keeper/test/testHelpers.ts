@@ -57,6 +57,7 @@ export function makeMockClients(robinhoodReads: ReadResponses, arbitrumReads: Re
       getTransactionReceipt: vi.fn(async () => null),
       getBlockNumber: vi.fn(async () => 2000n),
       getContractEvents: vi.fn(async () => []),
+      getLogs: vi.fn(async () => []),
     },
     robinhoodWallet: { writeContract, chain: { id: 4663 }, account },
     arbitrumPublic: { readContract: makeReadContract(arbitrumReads), getTransactionReceipt: vi.fn(async () => null) },

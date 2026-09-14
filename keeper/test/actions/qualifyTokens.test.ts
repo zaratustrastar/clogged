@@ -129,8 +129,8 @@ describe("qualifyMaturedTokens decision path", () => {
       "aboveThresholdSince:1": nowSec - 120n, // now active, re-read after the trade is observed
       "isCandidate:3,1": false,
     });
-    (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
-      async ({ eventName }: { eventName: string }) => (eventName === "Bought" ? [boughtLog] : [])
+    (clients.robinhoodPublic.getLogs as unknown as { mockImplementation: (fn: (args: { event: { name: string } }) => Promise<unknown[]>) => void }).mockImplementation(
+      async ({ event }: { event: { name: string } }) => (event.name === "Bought" ? [boughtLog] : [])
     );
     const lock = makeNoOpLock();
     // Token 1 known, but with NO initial active streak - it must be
@@ -157,8 +157,8 @@ describe("qualifyMaturedTokens decision path", () => {
       currentRoundId: 3n,
       "aboveThresholdSince:1": 0n, // the sell reset it - confirmed by the re-read after the Sold event
     });
-    (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
-      async ({ eventName }: { eventName: string }) => (eventName === "Sold" ? [soldLog] : [])
+    (clients.robinhoodPublic.getLogs as unknown as { mockImplementation: (fn: (args: { event: { name: string } }) => Promise<unknown[]>) => void }).mockImplementation(
+      async ({ event }: { event: { name: string } }) => (event.name === "Sold" ? [soldLog] : [])
     );
     const lock = makeNoOpLock();
     const watchlist = TokenWatchlist.withKnownTokens(clients.robinhoodPublic, config.eligibilityRegistry, [

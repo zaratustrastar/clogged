@@ -1,6 +1,7 @@
 import type { Clients } from "../clients.js";
 import type { KeeperConfig } from "../config.js";
 import type { ActionLock } from "../lock.js";
+import type { RoundLedger } from "../roundLedger.js";
 import { roundManagerAbi } from "../abis/roundManager.js";
 
 /**
@@ -11,49 +12,32 @@ import { roundManagerAbi } from "../abis/roundManager.js";
  * already attempts this automatically at close time when the round has
  * enough candidates; this action exists specifically for the case where
  * that automatic attempt reverted (e.g. the provider was temporarily
- * underfunded, CCIP briefly unavailable) - the contract's own
- * RandomnessRequestFailed event marks this, but polling round state
- * directly is simpler and sufficient for a v1 keeper.
+ * underfunded, CCIP briefly unavailable).
+ *
+ * NO FIXED LOOKBACK HORIZON: which roundIds might need a retry comes from
+ * `ledger` (see roundLedger.ts), reconstructed from real RoundClosed/
+ * RandomnessRequested/RoundSettled event history starting at
+ * deploymentBlock - not from scanning only the last N rounds. A round
+ * closed long before the keeper was last online is found exactly the same
+ * way as one closed a minute ago, because RoundManager itself places no
+ * age limit on when requestRandomnessForRound remains callable (confirmed
+ * directly against its source).
  *
  * Naturally idempotent at the contract level: requestRandomnessForRound
  * itself requires !randomnessRequested and !settled, so a stale retry
  * attempt against an already-resolved round simply reverts harmlessly.
  */
-const LOOKBACK_ROUNDS = 20n;
-
 export async function retryFailedRandomness(
   config: KeeperConfig,
   clients: Clients,
-  lock: ActionLock
+  lock: ActionLock,
+  ledger: RoundLedger
 ): Promise<{ acted: boolean; detail: string }[]> {
   const results: { acted: boolean; detail: string }[] = [];
 
-  const currentRoundId = (await clients.robinhoodPublic.readContract({
-    address: config.roundManager,
-    abi: roundManagerAbi,
-    functionName: "currentRoundId",
-  })) as bigint;
+  const dueRoundIds = ledger.needsRandomnessRetry();
 
-  const earliestToCheck = currentRoundId > LOOKBACK_ROUNDS ? currentRoundId - LOOKBACK_ROUNDS : 1n;
-
-  for (let roundId = earliestToCheck; roundId < currentRoundId; roundId++) {
-    const round = (await clients.robinhoodPublic.readContract({
-      address: config.roundManager,
-      abi: roundManagerAbi,
-      functionName: "getRound",
-      args: [roundId],
-    })) as {
-      closed: boolean;
-      drawSkipped: boolean;
-      randomnessRequested: boolean;
-      settled: boolean;
-    };
-
-    if (!round.closed) continue; // shouldn't happen for roundId < currentRoundId, but be defensive
-    if (round.drawSkipped) continue; // fewer than MIN_DRAW_CANDIDATES - no randomness to request
-    if (round.randomnessRequested) continue; // already requested (successfully) - nothing to retry
-    if (round.settled) continue; // already resolved
-
+  for (const roundId of dueRoundIds) {
     const lockKey = `retry-randomness-round-${roundId}`;
     if (await lock.isInFlight(lockKey, { robinhood: clients.robinhoodPublic, arbitrum: clients.arbitrumPublic })) {
       results.push({ acted: false, detail: `retry for round ${roundId} already in flight, skipping` });
@@ -78,7 +62,7 @@ export async function retryFailedRandomness(
   }
 
   if (results.length === 0) {
-    results.push({ acted: false, detail: "no closed, drawable, unrequested rounds found in lookback window" });
+    results.push({ acted: false, detail: `no closed, drawable, unrequested rounds found (ledger tracking ${ledger.outstandingCount} closed round(s) total)` });
   }
   return results;
 }

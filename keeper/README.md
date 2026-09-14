@@ -69,24 +69,24 @@ loop:
             qualify(tokenId)
             watchlist.markQualifiedForRound(tokenId, currentRoundId)
 
-    # 3. retry failed randomness requests (last 20 rounds)
-    for roundId in [currentRoundId - 20 .. currentRoundId - 1]:
-        r = getRound(roundId)
-        if not r.closed or r.drawSkipped or r.randomnessRequested or r.settled: continue
+    ledger.scanForNewEvents()   # incremental - shared by steps 3, 4, 5 below (one scan, not three)
+
+    # 3. retry failed randomness requests - NO fixed lookback: every closed,
+    #    drawable, unrequested round the ledger has ever seen is due, no
+    #    matter how long ago it closed
+    for roundId in ledger.needsRandomnessRetry():
         if not lock.inFlight("retry-randomness-round-{roundId}"):
             requestRandomnessForRound(roundId)
 
-    # 4. relay fulfilled VRF results (last 20 rounds)
-    for roundId in [currentRoundId - 20 .. currentRoundId - 1]:
-        r = getRound(roundId)
-        if not r.randomnessRequested or r.settled: continue
-        f = VRFWrapperOnArbitrum.fulfilledRequests(r.randomnessRequestId)   # on ARBITRUM
+    # 4. relay fulfilled VRF results - NO fixed lookback, same reasoning
+    for (roundId, requestId) in ledger.needsRelayCheck():
+        f = VRFWrapperOnArbitrum.fulfilledRequests(requestId)   # on ARBITRUM
         if not f.fulfilled or f.relayed: continue
         if not lock.inFlight("relay-randomness-request-{requestId}"):
-            relayRandomness(requestId)                                      # on ARBITRUM
+            relayRandomness(requestId)                            # on ARBITRUM
 
-    # 5. observe settlement (read-only, never a transaction)
-    for roundId in [currentRoundId - 20 .. currentRoundId - 1]:
+    # 5. observe settlement (read-only, never a transaction) - NO fixed lookback
+    for roundId in ledger.outstandingRequested():
         log round's settled/winner/stuck-warning status
 
     # 6. funding health (read-only, never a transaction, never auto-funds)
@@ -162,15 +162,29 @@ token's streak just changed" from an `EligibilityRegistry` event alone.
 What IS observable is trade activity on each token's own market:
 `EligibilityRegistry.onTrade()` (which drives `aboveThresholdSince`) is
 called by the market contract on every buy/sell, and `BondingCurveClog`
-itself emits real `Bought`/`Sold` events - one stream per market, but
-`eth_getLogs` accepts a multi-address filter, so watching "did ANY known
-market trade since I last checked" is a single RPC call regardless of how
-many thousands of markets exist, never one call per market. `tokenId` is
+itself emits real `Bought`/`Sold` events - one stream per market. Rather
+than filtering by every known market address (which risks an
+undocumented provider limit on address-array size once thousands of
+markets exist - real RPC providers vary, and none of that is ours to
+assume), this queries the `Bought`/`Sold` event **topics directly with no
+address filter at all** - `eth_getLogs`'s topic match is an exact,
+RPC-side comparison against the full 32-byte event-signature hash, so the
+query costs exactly the same (2 calls, one per event) whether 1 or 7,777
+markets exist. `tokenId` is
 never inferred from the `Bought`/`Sold` event's own fields (neither event
 carries one) - it comes from the log's own emitting contract address,
-matched against a `market -> tokenId` map built once from
-`TokenRegistered`'s own `(tokenId, market)` pair, the only place that
-mapping is ever established.
+matched locally against a `market -> tokenId` map built once from
+`TokenRegistered`'s own `(tokenId, market)` pair - a log from any other
+address (routine and expected with no address filter applied) is simply
+skipped.
+
+**RPC calls per poll:** exactly 2, regardless of market count.
+**Maximum request size:** bounded only by the block range scanned (new
+blocks since last poll), never by market count. **Worst case at 7,777
+markets:** unchanged - still exactly 2 calls; only the number of
+*results* can grow with real trading volume, never the request itself.
+**During high trading activity:** more logs come back in the same 2
+calls - never more calls, never a larger request.
 
 1. **Startup (once):** scan `TokenRegistered` (deploymentBlock -> latest)
    for every known tokenId + market address, then one `aboveThresholdSince`
@@ -196,6 +210,47 @@ many streaks are concurrently maturing, never with total tokens ever
 launched. See `test/actions/qualifyTokens.test.ts`'s "worst case at scale"
 test: 500 known tokens, only 1 with an active streak - exactly one
 `aboveThresholdSince` read happens, not 500.
+
+## Round ledger - no fixed lookback horizon
+
+`retryFailedRandomness`, `relayFulfilledRandomness`, and
+`observeSettlement` never scan only "the last N rounds". An earlier
+version of this keeper used a fixed 20-round lookback window in all
+three - a round the keeper was offline long enough to miss (more than 20
+rounds' worth of downtime) would have silently stopped being tracked
+forever, even though `RoundManager` itself places no age limit on when
+`requestRandomnessForRound`/`relayRandomness` remain callable (confirmed
+directly against both contracts' source).
+
+`RoundLedger` reconstructs outstanding work the same way `TokenWatchlist`
+reconstructs the token set - from real event history, with no horizon:
+
+- **Startup (once):** scan `RoundClosed`, `RandomnessRequested`, and
+  `RoundSettled` (deploymentBlock -> latest) to reconstruct the exact
+  real current state - which rounds are closed-but-unresolved, which
+  have a real `requestId` awaiting relay, which are already settled. A
+  bounded, one-time cost proportional to total rounds ever opened (set
+  by the protocol's own round cadence, not by token/market count).
+- **Every poll (cheap):** one incremental scan per event type - 3 total
+  `getContractEvents` calls, but against `RoundManager`'s single fixed
+  address, so no market-count-style scaling concern applies here at all.
+  `RoundSettled` removes a round from every internal map entirely (not
+  merely marks it done) - the ledger's own memory footprint is bounded by
+  *outstanding* work, never by total rounds ever opened.
+- `needsRandomnessRetry()` / `needsRelayCheck()` / `outstandingRequested()`
+  are small, precomputed sets with no age limit built in anywhere - a
+  round closed 10,000 rounds ago that's still unresolved is found and
+  acted on exactly the same way as one closed a minute ago.
+
+See `test/roundLedger.test.ts`'s own tests proving: many old outstanding
+rounds are all returned at once with no cap; a settled round is removed
+entirely, not merely skipped; and `RoundLedger.build` performs its scan
+starting at the real `deploymentBlock`, never genesis or "now". See also
+`test/actions/retryRandomness.test.ts` and `relayRandomness.test.ts`'s
+own "restart reconstructs outstanding work correctly" tests, which
+simulate a full process restart (a brand new ledger instance against the
+same real event history) and confirm the identical outstanding work is
+found again.
 
 ## Required keeper balances
 

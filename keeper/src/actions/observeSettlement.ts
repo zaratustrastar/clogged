@@ -1,5 +1,6 @@
 import type { Clients } from "../clients.js";
 import type { KeeperConfig } from "../config.js";
+import type { RoundLedger } from "../roundLedger.js";
 import { roundManagerAbi } from "../abis/roundManager.js";
 
 /**
@@ -11,49 +12,40 @@ import { roundManagerAbi } from "../abis/roundManager.js";
  * relayed message. This keeper never calls it and never could - this
  * action exists only to observe and log, so an operator (or external
  * alerting watching these log lines) notices if a round stays requested-
- * but-unsettled for an unusually long time, which would indicate a
- * problem elsewhere in the pipeline (CCIP delivery stuck, the provider's
- * own receive handler reverting, etc.) worth investigating - never
- * something this keeper attempts to fix directly.
+ * but-unsettled for an unusually long time.
+ *
+ * NO FIXED LOOKBACK HORIZON, for the same reason retryRandomness.ts and
+ * relayRandomness.ts have none (see roundLedger.ts): a round outstanding
+ * from long before the keeper was last online is reported exactly the
+ * same way as a recent one - `ledger.outstandingRequested()` is a small,
+ * precomputed set with no age limit built in, reconstructed from real
+ * event history rather than a bounded scan window.
  */
-const LOOKBACK_ROUNDS = 20n;
 /** How long a round can sit requested-but-unsettled before this action logs
  * a WARNING instead of an INFO line - generous, since real CCIP delivery
  * can legitimately take a while under network congestion. */
 const STUCK_WARNING_SECONDS = 30 * 60; // 30 minutes
 
-export async function observeSettlement(config: KeeperConfig, clients: Clients): Promise<{ level: "info" | "warn"; detail: string }[]> {
+export async function observeSettlement(
+  config: KeeperConfig,
+  clients: Clients,
+  ledger: RoundLedger
+): Promise<{ level: "info" | "warn"; detail: string }[]> {
   const results: { level: "info" | "warn"; detail: string }[] = [];
-
-  const currentRoundId = (await clients.robinhoodPublic.readContract({
-    address: config.roundManager,
-    abi: roundManagerAbi,
-    functionName: "currentRoundId",
-  })) as bigint;
-
-  const earliestToCheck = currentRoundId > LOOKBACK_ROUNDS ? currentRoundId - LOOKBACK_ROUNDS : 1n;
   const nowSec = Math.floor(Date.now() / 1000);
 
-  for (let roundId = earliestToCheck; roundId < currentRoundId; roundId++) {
+  for (const roundId of ledger.outstandingRequested()) {
     const round = (await clients.robinhoodPublic.readContract({
       address: config.roundManager,
       abi: roundManagerAbi,
       functionName: "getRound",
       args: [roundId],
-    })) as {
-      closeTime: bigint;
-      drawSkipped: boolean;
-      randomnessRequested: boolean;
-      settled: boolean;
-      winnerTokenId: bigint;
-    };
+    })) as { closeTime: bigint; settled: boolean; winnerTokenId: bigint };
 
-    if (round.drawSkipped) continue; // nothing to settle
     if (round.settled) {
       results.push({ level: "info", detail: `round ${roundId} settled, winner tokenId ${round.winnerTokenId}` });
       continue;
     }
-    if (!round.randomnessRequested) continue; // handled by retryRandomness action, not this one
 
     const ageSinceClose = nowSec - Number(round.closeTime);
     if (ageSinceClose > STUCK_WARNING_SECONDS) {
@@ -66,5 +58,8 @@ export async function observeSettlement(config: KeeperConfig, clients: Clients):
     }
   }
 
+  if (results.length === 0) {
+    results.push({ level: "info", detail: "no rounds currently requested-and-unsettled" });
+  }
   return results;
 }

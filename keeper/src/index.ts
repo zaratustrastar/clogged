@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { createClients } from "./clients.js";
 import { ActionLock } from "./lock.js";
 import { TokenWatchlist } from "./tokenWatchlist.js";
+import { RoundLedger } from "./roundLedger.js";
 import { logger } from "./logger.js";
 import { withRetry } from "./retry.js";
 import { closeDueRounds } from "./actions/closeRounds.js";
@@ -16,23 +17,38 @@ import { checkFundingHealth } from "./actions/fundingHealth.js";
  * deliberate: close due rounds first (this can also trigger the first
  * randomness request attempt for the round just closed), then qualify any
  * matured tokens for the round now open (so they're candidates before the
- * NEXT close), then retry any randomness requests that failed earlier,
- * then relay any results Arbitrum has already fulfilled, then the two
- * purely observational checks last. Every step is wrapped in withRetry
- * (transient RPC failures only - see retry.ts) AND a try/catch, so one
- * step's exhausted retries or genuine failure never blocks the others.
+ * NEXT close), then refresh the round ledger ONCE (shared by retry/relay/
+ * observe below - avoids three redundant incremental event scans over the
+ * same block range in a single loop iteration), then retry any randomness
+ * requests that failed earlier, then relay any results Arbitrum has
+ * already fulfilled, then the two purely observational checks last. Every
+ * step is wrapped in withRetry (transient RPC failures only - see
+ * retry.ts) AND a try/catch, so one step's exhausted retries or genuine
+ * failure never blocks the others.
  */
 async function runOnce(
   config: ReturnType<typeof loadConfig>,
   clients: ReturnType<typeof createClients>,
   lock: ActionLock,
-  watchlist: TokenWatchlist
+  watchlist: TokenWatchlist,
+  ledger: RoundLedger
 ): Promise<void> {
+  try {
+    await withRetry(() => ledger.scanForNewEvents(), {
+      maxAttempts: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 8_000,
+      actionLabel: "roundLedger.scanForNewEvents",
+    });
+  } catch (err) {
+    logger.error("roundLedger.scanForNewEvents", `failed after retries: ${(err as Error).message}`);
+  }
+
   const steps: { name: string; run: () => Promise<{ acted: boolean; detail: string } | { acted: boolean; detail: string }[]> }[] = [
     { name: "closeDueRounds", run: () => closeDueRounds(config, clients, lock) },
     { name: "qualifyMaturedTokens", run: () => qualifyMaturedTokens(config, clients, lock, watchlist) },
-    { name: "retryFailedRandomness", run: () => retryFailedRandomness(config, clients, lock) },
-    { name: "relayFulfilledRandomness", run: () => relayFulfilledRandomness(config, clients, lock) },
+    { name: "retryFailedRandomness", run: () => retryFailedRandomness(config, clients, lock, ledger) },
+    { name: "relayFulfilledRandomness", run: () => relayFulfilledRandomness(config, clients, lock, ledger) },
   ];
 
   for (const step of steps) {
@@ -48,7 +64,7 @@ async function runOnce(
   }
 
   try {
-    const settlement = await withRetry(() => observeSettlement(config, clients), {
+    const settlement = await withRetry(() => observeSettlement(config, clients, ledger), {
       maxAttempts: 3,
       baseDelayMs: 500,
       maxDelayMs: 8_000,
@@ -91,9 +107,19 @@ async function main(): Promise<void> {
   logger.info(
     "startup",
     `token watchlist reconstructed from onchain event history: ${watchlist.size} known token(s), ${watchlist.activeStreakCount} with an active above-threshold streak right now`,
-    {
-    fromBlock: config.deploymentBlock.toString(),
-  });
+    { fromBlock: config.deploymentBlock.toString() }
+  );
+
+  // Reconstructed from real RoundClosed/RandomnessRequested/RoundSettled
+  // event history starting at deploymentBlock - NO fixed lookback window,
+  // so a round closed long before this process last ran is found exactly
+  // the same way as a recent one (see roundLedger.ts's own docs).
+  const ledger = await RoundLedger.build(clients.robinhoodPublic, config.roundManager, config.deploymentBlock);
+  logger.info(
+    "startup",
+    `round ledger reconstructed from onchain event history: ${ledger.outstandingCount} closed round(s) tracked, ${ledger.needsRandomnessRetry().length} needing a randomness request, ${ledger.needsRelayCheck().length} awaiting relay`,
+    { fromBlock: config.deploymentBlock.toString() }
+  );
 
   // Single-shot mode for dry-run/manual invocation and for testing -
   // KEEPER_RUN_ONCE=true (or --dry-run alone, which implies one pass is
@@ -102,7 +128,7 @@ async function main(): Promise<void> {
   const runOnceOnly = config.dryRun || process.env.KEEPER_RUN_ONCE === "true";
 
   if (runOnceOnly) {
-    await runOnce(config, clients, lock, watchlist);
+    await runOnce(config, clients, lock, watchlist, ledger);
     logger.info("shutdown", "Single pass complete, exiting.");
     return;
   }
@@ -127,7 +153,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => requestShutdown("SIGINT"));
 
   while (!shuttingDown && !forceExit) {
-    await runOnce(config, clients, lock, watchlist);
+    await runOnce(config, clients, lock, watchlist, ledger);
     if (shuttingDown || forceExit) break;
     await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));
   }

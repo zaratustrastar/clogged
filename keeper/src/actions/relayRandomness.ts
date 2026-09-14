@@ -1,7 +1,7 @@
 import type { Clients } from "../clients.js";
 import type { KeeperConfig } from "../config.js";
 import type { ActionLock } from "../lock.js";
-import { roundManagerAbi } from "../abis/roundManager.js";
+import type { RoundLedger } from "../roundLedger.js";
 import { vrfWrapperOnArbitrumAbi } from "../abis/vrfWrapperOnArbitrum.js";
 
 /**
@@ -16,47 +16,30 @@ import { vrfWrapperOnArbitrumAbi } from "../abis/vrfWrapperOnArbitrum.js";
  * this keeper's - this action only ever relays an ALREADY-fulfilled word
  * onward, never triggers fulfillment itself.
  *
- * Which requestIds to check comes from the Robinhood side, not a direct
- * Arbitrum-side enumeration (the wrapper exposes no "list all request ids"
- * getter): any round with randomnessRequested=true and settled=false has a
- * real randomnessRequestId that may now be fulfilled and awaiting relay.
+ * NO FIXED LOOKBACK HORIZON: which requestIds to check comes from `ledger`
+ * (see roundLedger.ts), reconstructed from real RoundClosed/
+ * RandomnessRequested/RoundSettled event history starting at
+ * deploymentBlock - not from scanning only the last N rounds. A request
+ * outstanding from long before the keeper was last online is found
+ * exactly the same way as a recent one, because neither RoundManager nor
+ * VRFWrapperOnArbitrum places any age limit on relaying a fulfilled word
+ * (confirmed directly against both contracts' own source).
  *
  * Naturally idempotent at the contract level: relayRandomness itself
  * requires !relayed, so a redundant call against an already-relayed
  * request simply reverts harmlessly.
  */
-const LOOKBACK_ROUNDS = 20n;
-
 export async function relayFulfilledRandomness(
   config: KeeperConfig,
   clients: Clients,
-  lock: ActionLock
+  lock: ActionLock,
+  ledger: RoundLedger
 ): Promise<{ acted: boolean; detail: string }[]> {
   const results: { acted: boolean; detail: string }[] = [];
 
-  const currentRoundId = (await clients.robinhoodPublic.readContract({
-    address: config.roundManager,
-    abi: roundManagerAbi,
-    functionName: "currentRoundId",
-  })) as bigint;
+  const dueRequests = ledger.needsRelayCheck();
 
-  const earliestToCheck = currentRoundId > LOOKBACK_ROUNDS ? currentRoundId - LOOKBACK_ROUNDS : 1n;
-
-  for (let roundId = earliestToCheck; roundId < currentRoundId; roundId++) {
-    const round = (await clients.robinhoodPublic.readContract({
-      address: config.roundManager,
-      abi: roundManagerAbi,
-      functionName: "getRound",
-      args: [roundId],
-    })) as {
-      randomnessRequested: boolean;
-      randomnessRequestId: bigint;
-      settled: boolean;
-    };
-
-    if (!round.randomnessRequested || round.settled) continue;
-
-    const requestId = round.randomnessRequestId;
+  for (const { roundId, requestId } of dueRequests) {
     const fulfilledRequest = (await clients.arbitrumPublic.readContract({
       address: config.arbitrumVrfWrapper,
       abi: vrfWrapperOnArbitrumAbi,
@@ -91,7 +74,7 @@ export async function relayFulfilledRandomness(
   }
 
   if (results.length === 0) {
-    results.push({ acted: false, detail: "no fulfilled-but-unrelayed randomness requests found in lookback window" });
+    results.push({ acted: false, detail: `no fulfilled-but-unrelayed randomness requests found (ledger tracking ${dueRequests.length} outstanding request(s))` });
   }
   return results;
 }

@@ -2,6 +2,16 @@ import type { PublicClient, Address } from "viem";
 import { eligibilityRegistryAbi } from "./abis/eligibilityRegistry.js";
 import { bondingCurveClogAbi } from "./abis/bondingCurveClog.js";
 
+// Extracted once as standalone event ABI items (not the full contract ABI)
+// specifically so scanForTradeActivity can query them via client.getLogs()
+// WITHOUT an address filter at all - see that method's own docs for why
+// this, not a multi-address filter, is the robust design at scale.
+const BOUGHT_EVENT = bondingCurveClogAbi.find((item) => item.type === "event" && item.name === "Bought");
+const SOLD_EVENT = bondingCurveClogAbi.find((item) => item.type === "event" && item.name === "Sold");
+if (!BOUGHT_EVENT || !SOLD_EVENT) {
+  throw new Error("bondingCurveClogAbi is missing the Bought/Sold event definitions - ABI may be stale, regenerate it");
+}
+
 /**
  * Maintains a genuinely SMALL active set of tokens worth checking for
  * maturity - not "every launched token minus the ones already qualified
@@ -20,10 +30,16 @@ import { bondingCurveClogAbi } from "./abis/bondingCurveClog.js";
  * (which drives aboveThresholdSince) is called BY the market contract on
  * every buy/sell, and BondingCurveClog itself DOES emit real Bought/Sold
  * events (confirmed directly against its source) - one event stream per
- * market, but eth_getLogs accepts a MULTI-ADDRESS filter, so watching
- * "did ANY known market trade since I last checked" is a single RPC call
- * regardless of how many thousands of markets exist, not one call per
- * market.
+ * market. Rather than filtering eth_getLogs by every known market
+ * address (which risks an undocumented provider limit on address-array
+ * size once thousands of markets exist - the standard JSON-RPC spec
+ * places no bound on it, but real providers vary and none of that is
+ * ours to assume), this queries the Bought/Sold event TOPICS directly
+ * with NO address filter at all - eth_getLogs's topic match is an exact,
+ * RPC-side comparison against the full 32-byte event-signature hash, so
+ * the query costs the same regardless of whether 1 or 7,777 markets
+ * exist. See scanForTradeActivity's own docs for the exact RPC-call/
+ * request-size accounting this gives.
  *
  * tokenId<->market mapping is never inferred from the Bought/Sold events
  * themselves (they carry no tokenId field at all - only buyer/seller and
@@ -43,9 +59,10 @@ import { bondingCurveClogAbi } from "./abis/bondingCurveClog.js";
  *   runtime (every poll, cheap):
  *     1. scan TokenRegistered incrementally (new blocks only) -> any newly
  *        launched token gets its own one-time aboveThresholdSince seed read
- *     2. ONE eth_getLogs call across ALL known market addresses (new
- *        blocks only) for Bought+Sold -> resolves to a small set of
- *        tokenIds that traded since last check
+ *     2. exactly 2 eth_getLogs calls (Bought, Sold), each WITHOUT an
+ *        address filter - new blocks only - resolves to a small set of
+ *        tokenIds that traded since last check, regardless of how many
+ *        markets are known
  *     3. re-read aboveThresholdSince ONLY for that small traded set -
  *        updates/removes them from the active-streak set based on the
  *        real, current value (0 = streak reset, removed; nonzero = active,
@@ -164,12 +181,30 @@ export class TokenWatchlist {
     return added;
   }
 
-  /** Incremental only - ONE getLogs call per event type across every known
-   * market address at once (never one call per market), scanning only the
-   * block range since the last check. Returns the tokenIds whose
-   * aboveThresholdSince was actually re-read (i.e. that traded), for
-   * logging/visibility - the internal active-streak set is already updated
-   * by the time this returns. */
+  /** Incremental only - queries the Bought/Sold event TOPICS directly via
+   * client.getLogs(), deliberately WITHOUT an address filter, rather than
+   * a multi-address filter across every known market. This is the robust
+   * design at scale: eth_getLogs's topic filter is a precise, RPC-side
+   * exact match against the full 32-byte keccak256 event-signature hash
+   * (standard JSON-RPC behavior, not a provider-specific feature), so it
+   * costs no more RPC calls or request size at 7,777 markets than it does
+   * at one - there is no undocumented address-array-size limit to run
+   * into, because no address array is ever sent. The (astronomically
+   * unlikely) theoretical risk of an unrelated contract emitting a log
+   * with the identical topic0 is closed by the SAME local-filtering
+   * safeguard already in place below: any log whose emitting address
+   * isn't in marketToTokenId is silently skipped, exactly as before.
+   *
+   * RPC calls per poll: exactly 2 (one for Bought, one for Sold),
+   * regardless of known-market count. Maximum request size: bounded by
+   * the block range alone (new blocks since last poll), never by market
+   * count. Worst case at 7,777 markets: unchanged - still 2 calls; the
+   * only cost that scales with market count is the number of RESULTS
+   * potentially returned during a burst of real trading activity across
+   * many markets at once, which is bounded by actual chain throughput
+   * (real transactions really mined in that block range), not by this
+   * design. During high trading activity, more logs come back in the
+   * same 2 calls - never more calls, never a larger request. */
   async scanForTradeActivity(): Promise<bigint[]> {
     const latest = await this.client.getBlockNumber();
     if (latest < this.lastScannedTradeBlock || this.tokenIdToMarket.size === 0) {
@@ -177,19 +212,14 @@ export class TokenWatchlist {
       return [];
     }
 
-    const marketAddresses = Array.from(this.tokenIdToMarket.values());
     const [boughtLogs, soldLogs] = await Promise.all([
-      this.client.getContractEvents({
-        address: marketAddresses,
-        abi: bondingCurveClogAbi,
-        eventName: "Bought",
+      this.client.getLogs({
+        event: BOUGHT_EVENT as never,
         fromBlock: this.lastScannedTradeBlock,
         toBlock: latest,
       }),
-      this.client.getContractEvents({
-        address: marketAddresses,
-        abi: bondingCurveClogAbi,
-        eventName: "Sold",
+      this.client.getLogs({
+        event: SOLD_EVENT as never,
         fromBlock: this.lastScannedTradeBlock,
         toBlock: latest,
       }),
@@ -203,10 +233,12 @@ export class TokenWatchlist {
       // CONTRACT ADDRESS matched against marketToTokenId (built solely
       // from TokenRegistered's own (tokenId, market) pair) - never from
       // any field within the Bought/Sold event itself, since neither event
-      // carries a tokenId at all. A log from an address not in
-      // marketToTokenId (which should never happen, since the filter above
-      // is scoped to exactly the known market addresses) is silently
-      // skipped rather than guessed at.
+      // carries a tokenId at all. Because this query has no address filter
+      // at all, a log from an address NOT in marketToTokenId is expected
+      // and routine (any other contract's own same-shaped event, or a
+      // CLOG market not yet known to this watchlist) - silently skipped
+      // rather than guessed at, exactly as the address-filtered version
+      // did for its own (much narrower) set of possible surprises.
       if (tokenId !== undefined) tradedTokenIds.add(tokenId);
     }
 
