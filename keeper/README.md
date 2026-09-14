@@ -55,12 +55,14 @@ loop:
         if not lock.inFlight("close-round-{id}"):
             closeRoundAndOpenNext()
 
-    # 2. qualify matured tokens (watchlist-driven, not brute-forced)
-    watchlist.scanForNewTokens()       # incremental only - new blocks since last scan
-    for tokenId in watchlist.tokensToCheck(currentRoundId):   # excludes already-qualified-this-round
-        since = aboveThresholdSince(tokenId)
-        if since == 0: continue                                 # never above threshold / reset
-        if now - since < requiredAbsoluteSeconds: continue        # not mature yet
+    # 2. qualify matured tokens (small active-set watchlist, event-driven)
+    watchlist.scanForNewTokens()       # incremental - new TokenRegistered events only, seeds each new token's initial aboveThresholdSince
+    watchlist.scanForTradeActivity()   # incremental - ONE getLogs call across ALL known markets for Bought+Sold, re-reads aboveThresholdSince ONLY for tokens that actually traded
+    for tokenId in watchlist.dueForCheck(currentRoundId, now, requiredAbsoluteSeconds):  # active-streak AND scheduled-maturity-time-passed AND not-yet-qualified-this-round
+        since = aboveThresholdSince(tokenId)      # re-confirm directly before spending gas
+        watchlist.recordThresholdRead(tokenId, since)
+        if since == 0: continue                     # reset since it was scheduled
+        if now - since < requiredAbsoluteSeconds: continue
         if isCandidate(currentRoundId, tokenId):
             watchlist.markQualifiedForRound(tokenId, currentRoundId); continue
         if not lock.inFlight("qualify-token-{tokenId}"):
@@ -142,28 +144,58 @@ exactly why "observe settlement" is read-only, not an action.
   this repository uses a fake, hardcoded test key and a mocked RPC client -
   see "Not yet deployed" below.
 
-## Token watchlist - never brute-forces the tokenId space
+## Token watchlist - a genuinely small active set, not brute force
 
-`qualifyMaturedTokens` does NOT read `nextTokenId` and loop over every
-possible tokenId (which would mean up to 7,777 RPC calls every poll at the
-protocol's ticker cap). Instead, `TokenWatchlist`:
+`qualifyMaturedTokens` never reads `nextTokenId` and loops over every
+possible tokenId. It also does NOT merely re-check "every launched token
+except the ones already qualified this round" - an earlier version of this
+class did exactly that, which is not actually small once the protocol
+approaches its 7,777-ticker cap (most launched tokens are never mature at
+any given moment, so re-reading `aboveThresholdSince` for all of them every
+poll scales with total tokens ever launched, not with real activity).
 
-1. At startup, does exactly ONE `getContractEvents` scan for
-   `TokenRegistered`, from the manifest's verified `deploymentBlock` to the
-   current block - reconstructing the real, current set of registered
-   tokenIds from actual chain history, not a guess.
-2. On each poll, does one cheap incremental scan (only the block range
-   since the previous check) to pick up newly-registered tokens.
-3. Tracks, per tokenId, which round it has already been confirmed
-   qualified for - once qualified for the current round, a token is
-   excluded from `tokensToCheck()` entirely until a new round opens. In
-   steady state, the set of tokens actually re-examined every poll is only
-   the ones NOT yet qualified for whichever round is currently open - a
-   small, bounded number regardless of how many thousands of tokens have
-   been launched historically.
+`EligibilityRegistry` does not emit an event when a token's
+`aboveThresholdSince` starts or resets (confirmed directly against its
+source - it emits only `TokenRegistered`, `Qualified`, `RoundOpened`,
+`RoundManagerInitialized`), so there is no direct way to learn "this
+token's streak just changed" from an `EligibilityRegistry` event alone.
+What IS observable is trade activity on each token's own market:
+`EligibilityRegistry.onTrade()` (which drives `aboveThresholdSince`) is
+called by the market contract on every buy/sell, and `BondingCurveClog`
+itself emits real `Bought`/`Sold` events - one stream per market, but
+`eth_getLogs` accepts a multi-address filter, so watching "did ANY known
+market trade since I last checked" is a single RPC call regardless of how
+many thousands of markets exist, never one call per market. `tokenId` is
+never inferred from the `Bought`/`Sold` event's own fields (neither event
+carries one) - it comes from the log's own emitting contract address,
+matched against a `market -> tokenId` map built once from
+`TokenRegistered`'s own `(tokenId, market)` pair, the only place that
+mapping is ever established.
 
-See `test/actions/qualifyTokens.test.ts`'s own "never brute-forces" test,
-which asserts `nextTokenId` is never even read.
+1. **Startup (once):** scan `TokenRegistered` (deploymentBlock -> latest)
+   for every known tokenId + market address, then one `aboveThresholdSince`
+   read per known token to seed the active-streak set. Both are real,
+   bounded, one-time costs - not repeated every poll.
+2. **Every poll (cheap):** one incremental `TokenRegistered` scan (new
+   blocks only; any newly-launched token gets its own one-time seed read);
+   one `eth_getLogs` call across every known market address for
+   `Bought`+`Sold` (new blocks only) - resolves to a small set of tokenIds
+   that actually traded; `aboveThresholdSince` is re-read ONLY for that
+   small traded set, updating or removing them from the active-streak set
+   based on the real, current value.
+3. **`dueForCheck()`:** only active-streak tokens (nonzero
+   `aboveThresholdSince`) whose scheduled maturity time
+   (`aboveThresholdSince + requiredAbsoluteSeconds`) has already passed,
+   and that are not already marked qualified for the current round. This -
+   not the full active-streak set, and never the full watchlist - is what
+   `qualifyMaturedTokens` actually re-reads `isCandidate()`/calls
+   `qualify()` for.
+
+**Result:** per-poll RPC reads scale with real trading activity and how
+many streaks are concurrently maturing, never with total tokens ever
+launched. See `test/actions/qualifyTokens.test.ts`'s "worst case at scale"
+test: 500 known tokens, only 1 with an active streak - exactly one
+`aboveThresholdSince` read happens, not 500.
 
 ## Required keeper balances
 

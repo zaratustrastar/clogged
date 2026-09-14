@@ -16,17 +16,16 @@ import { eligibilityRegistryAbi } from "../abis/eligibilityRegistry.js";
  * new trade happening afterward to trigger that automatically - exactly
  * the gap the permissionless qualify() function exists to close.
  *
- * Detection is fully read-only, no guessing: aboveThresholdSince(tokenId)
- * (0 if not currently above threshold, else the timestamp the current
- * streak began) plus requiredAbsoluteSeconds (immutable, read once) tells
- * us definitively whether a token has matured. isCandidate() confirms it
- * isn't already qualified for the current round before spending gas.
- *
- * NEVER brute-forces the full tokenId space (see tokenWatchlist.ts): which
- * tokenIds to even consider comes from `watchlist`, built from real
- * TokenRegistered event history at startup and refreshed incrementally -
- * not from looping 1..nextTokenId-1. Only tokens the watchlist reports as
- * not-yet-qualified-for-the-current-round are read here at all.
+ * NEVER reads aboveThresholdSince/isCandidate for every launched token
+ * every poll (see tokenWatchlist.ts's own architecture notes for the full
+ * design and why an event-driven approach is required - EligibilityRegistry
+ * emits no above-threshold-start/reset event of its own, so trade activity
+ * on each token's own market, via BondingCurveClog's real Bought/Sold
+ * events, is what's watched instead). This action only ever reads
+ * onchain state for watchlist.dueForCheck()'s own small, precomputed set -
+ * active-streak tokens whose scheduled maturity time has already passed
+ * and are not yet qualified for the current round - never the full
+ * watchlist, and never the full tokenId space.
  */
 export async function qualifyMaturedTokens(
   config: KeeperConfig,
@@ -39,6 +38,13 @@ export async function qualifyMaturedTokens(
   const added = await watchlist.scanForNewTokens();
   if (added > 0) {
     results.push({ acted: false, detail: `watchlist: discovered ${added} newly-registered token(s), now tracking ${watchlist.size} total` });
+  }
+  const traded = await watchlist.scanForTradeActivity();
+  if (traded.length > 0) {
+    results.push({
+      acted: false,
+      detail: `watchlist: ${traded.length} token(s) traded since last check, re-read (active streak count now ${watchlist.activeStreakCount})`,
+    });
   }
 
   const [requiredAbsoluteSeconds, currentRoundId] = await Promise.all([
@@ -55,18 +61,24 @@ export async function qualifyMaturedTokens(
   ]);
 
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
-  const candidateTokenIds = watchlist.tokensToCheck(currentRoundId);
+  const dueTokenIds = watchlist.dueForCheck(currentRoundId, nowSec, requiredAbsoluteSeconds);
 
-  for (const tokenId of candidateTokenIds) {
+  for (const tokenId of dueTokenIds) {
+    // Re-read directly rather than trusting the watchlist's own
+    // last-scanned value - closes the gap between "matured as of the last
+    // trade-activity scan" and "matured right now", and catches a
+    // last-second reset scanForTradeActivity hasn't observed yet (e.g. a
+    // sell in the same block range not yet incorporated).
     const aboveThresholdSince = (await clients.robinhoodPublic.readContract({
       address: config.eligibilityRegistry,
       abi: eligibilityRegistryAbi,
       functionName: "aboveThresholdSince",
       args: [tokenId],
     })) as bigint;
+    watchlist.recordThresholdRead(tokenId, aboveThresholdSince);
 
-    if (aboveThresholdSince === 0n) continue; // not currently above threshold at all
-    if (nowSec - aboveThresholdSince < requiredAbsoluteSeconds) continue; // hasn't matured yet
+    if (aboveThresholdSince === 0n) continue; // reset since it was scheduled - no longer due
+    if (nowSec - aboveThresholdSince < requiredAbsoluteSeconds) continue; // streak restarted more recently than expected
 
     const alreadyCandidate = (await clients.robinhoodPublic.readContract({
       address: config.eligibilityRegistry,
@@ -76,8 +88,8 @@ export async function qualifyMaturedTokens(
     })) as boolean;
     if (alreadyCandidate) {
       // Trade activity qualified it automatically since we last checked -
-      // record it so the watchlist stops re-reading this token for this
-      // round without needing another qualify() call.
+      // record it so it's excluded from dueForCheck for this round without
+      // needing another qualify() call.
       watchlist.markQualifiedForRound(tokenId, currentRoundId);
       continue;
     }
@@ -106,8 +118,11 @@ export async function qualifyMaturedTokens(
     results.push({ acted: true, detail: `qualify(${tokenId}) submitted: ${txHash}` });
   }
 
-  if (results.length === 0) {
-    results.push({ acted: false, detail: `no matured, not-yet-candidate tokens found (watchlist size: ${watchlist.size})` });
+  if (results.length === 0 || results.every((r) => !r.acted)) {
+    results.push({
+      acted: false,
+      detail: `no tokens due for qualification this poll (watchlist: ${watchlist.size} known, ${watchlist.activeStreakCount} with an active streak, ${dueTokenIds.length} due)`,
+    });
   }
   return results;
 }

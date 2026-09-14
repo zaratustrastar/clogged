@@ -88,7 +88,10 @@ async function main(): Promise<void> {
   }
 
   const watchlist = await TokenWatchlist.build(clients.robinhoodPublic, config.eligibilityRegistry, config.deploymentBlock);
-  logger.info("startup", `token watchlist reconstructed from onchain event history: ${watchlist.size} known token(s)`, {
+  logger.info(
+    "startup",
+    `token watchlist reconstructed from onchain event history: ${watchlist.size} known token(s), ${watchlist.activeStreakCount} with an active above-threshold streak right now`,
+    {
     fromBlock: config.deploymentBlock.toString(),
   });
 
