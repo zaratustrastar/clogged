@@ -111,6 +111,12 @@ curl -sI https://clog.run/uploads/test.txt | head -5   # expect 404 now
 
 ## Standard update sequence
 
+Covers both code changes and deployment-manifest changes (see
+`docs/DEPLOYMENTS.md` — switching which contracts `clog.run` points at is
+now just an edit to `deployments/robinhood-mainnet.json`, committed like any
+other code change, picked up by this exact same `git pull` + build +
+restart sequence):
+
 ```bash
 cd /opt/clogged
 git pull origin main
