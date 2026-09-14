@@ -18,7 +18,8 @@
     "chainlinkRandomnessProvider": "0x4bB627192D56091f6ac0E17c179d608bf3eDDA0c",
     "arbitrumVrfWrapper": "0x476d0e97dD7EA31e07D2362470CEF18B5fe394d8",
     "arbitrumVrfSubscriptionId": "83568090110973637554258631175012043155383488095251779152218551458964868806531",
-    "arbitrumVrfKeyHash": "0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409"
+    "arbitrumVrfKeyHash": "0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409",
+    "arbitrumVrfCoordinator": "0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e"
   },
 
   "$verification": {
