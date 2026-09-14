@@ -3,7 +3,7 @@
 
   "chainId": 4663,
 
-  "deploymentBlock": null,
+  "deploymentBlock": 61564258,
 
   "contracts": {
     "tickerRegistry": "0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2",
@@ -22,8 +22,10 @@
   },
 
   "$verification": {
-    "$comment": "NOT independently verified on-chain as of this file's creation - see docs/DEPLOYMENTS.md. Run scripts/verify-deployment.sh against a real RPC endpoint before treating this file as trustworthy, and fill in deploymentBlock (above, currently null) from its output before pointing clog.run at this deployment.",
-    "verifiedAt": null,
-    "verifiedBy": null
+    "$comment": "Independently verified on-chain via scripts/verify-deployment.sh, run by the operator against real RPC access to both chains (this repository's own preparation environment has no such access - see docs/DEPLOYMENTS.md). Every check passed: chain ids on both RPCs, code presence at all six addresses across both chains, every Robinhood-side cross-contract getter (TickerRegistry.eligibilityRegistry/.tickerNFT/.winnerPot, TickerNFT.tickerRegistry, RoundManager.engine/.randomnessProvider/.rewardVault, RewardVault.roundManager, EligibilityRegistry.roundManager, ChainlinkRandomnessProvider.roundManager/.wrapperOnArbitrum), the cross-chain VRFWrapperOnArbitrum.providerOnRobinhoodChain/.subscriptionId/.keyHash checks, and deploymentBlock itself - resolved and confirmed from the real TickerRegistry deployment transaction's own receipt (status=success, contractAddress matches this file's tickerRegistry exactly, blockNumber matches the operator's independently-supplied EXPECTED_DEPLOYMENT_BLOCK exactly), never merely accepted from a claimed value.",
+    "verifiedAt": "2026-09-14",
+    "verifiedBy": "operator, via scripts/verify-deployment.sh against live Robinhood Chain and Arbitrum One RPC endpoints",
+    "verifiedDeploymentTxHash": "0x9e32d45c18e8828f60622174112d1bf7dc5ba20cafdad9be4a82ae3e105eaa32",
+    "verifierScriptCommit": "0d1ae78d2cfdadc6d28de4c26e75b6d57274d859"
   }
 }
