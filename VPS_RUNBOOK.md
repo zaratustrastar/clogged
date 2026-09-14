@@ -197,9 +197,12 @@ npm ci
 sudo -u clog npm run build
 
 # 3. Optional but recommended: back up the DB before any schema change,
-#    and confirm connectivity/read access first.
-sudo -u clog pg_dump -Fc clog > /var/backups/clog-pre-migration-002-$(date +%Y%m%d%H%M%S).dump
-psql -U clogapp -d clog -c "SELECT count(*) FROM token_profiles;"   # read-only sanity check
+#    and confirm connectivity/read access first. Runs as the `postgres`
+#    superuser, not the `clog` Unix user - there is no guarantee the
+#    `clog` Unix account can authenticate as a matching Postgres role,
+#    and `postgres` can always read/dump any local database regardless.
+sudo -u postgres pg_dump -Fc clog > /var/backups/clog-pre-migration-002-$(date +%Y%m%d%H%M%S).dump
+sudo -u postgres psql -d clog -c "SELECT count(*) FROM token_profiles;"   # read-only sanity check
 
 # 4. Stop the app. This IS the downtime window - old app writes cannot
 #    fail against a schema it never sees, because it isn't running.
@@ -220,29 +223,34 @@ sudo systemctl status clog
 # 7. Health + metadata smoke tests - see below.
 ```
 
-**If migration (step 5) fails:** do NOT run step 6. The app is currently
-stopped (real downtime, but a safe state - no code is running against a
+**If migration (step 5) fails:** `scripts/migrate.mjs` runs every
+migration file inside its own `BEGIN`/`COMMIT`, with an explicit
+`ROLLBACK` in its `catch` block before re-throwing (confirmed directly
+against the script's own source, not assumed) - a failure partway through
+migration 002's SQL is automatically rolled back by Postgres itself. The
+normal recovery state is already the old schema; there is nothing to
+manually reverse as the first response. The app is also currently stopped
+(real downtime, but a safe state - no code is running against a
 half-migrated or mismatched schema). Recovery:
-1. Inspect the actual error from `scripts/migrate.mjs`'s own output.
-2. If the migration is safe to retry (e.g. a transient DB connection
+1. Inspect the actual error from `scripts/migrate.mjs`'s own output - the
+   transaction is already gone, so this is purely diagnostic.
+2. Confirm the schema is genuinely still the old one:
+   `sudo -u postgres psql -d clog -c "\d token_profiles"` should show the
+   original single-column `token_id` primary key, with no `chain_id`/
+   `ticker_registry_address` columns - if so, no DB action is needed at
+   all before deciding what to do next.
+3. If the migration is safe to retry (e.g. a transient DB connection
    issue, not a real schema conflict), fix the cause and re-run step 5.
-3. If it must be rolled back: migration 002 is reversible by hand (it
-   only adds two columns and changes the PK - see the exact reverse SQL
-   in `docs/DEPLOYMENTS.md`'s rollback note, or run:
-   ```sql
-   ALTER TABLE token_profiles DROP CONSTRAINT token_profiles_pkey;
-   ALTER TABLE token_profiles ADD PRIMARY KEY (token_id);
-   ALTER TABLE token_profiles ALTER COLUMN chain_id DROP NOT NULL;
-   ALTER TABLE token_profiles ALTER COLUMN ticker_registry_address DROP NOT NULL;
-   ```
-   or restore the pre-migration backup from step 3:
-   `pg_restore -d clog --clean /var/backups/clog-pre-migration-002-<timestamp>.dump`)
-4. Once the schema is confirmed back to its pre-migration shape, start
-   the OLD app: `git checkout main` (or whatever commit was running
-   before this rollout), `npm ci`, `sudo -u clog npm run build`,
-   `sudo systemctl start clog`. This full rebuild is the cost of a true
-   rollback after step 1 already pulled new source - there is no shortcut
-   that avoids it once the working tree has moved past the old commit.
+4. If serving traffic again before a fix is ready matters more than
+   completing this rollout right now: the old schema is already in place
+   (per step 2's confirmation), so just rebuild and start the OLD app:
+   `git checkout main` (or whatever commit was running before this
+   rollout), `npm ci`, `sudo -u clog npm run build`,
+   `sudo systemctl start clog`. This full rebuild is the cost of
+   returning to the old app after step 1 already pulled new source -
+   there is no shortcut that avoids it once the working tree has moved
+   past the old commit; it is NOT needed to fix the schema itself, which
+   the automatic rollback already handled.
 
 **If the app fails to start (step 6) after a SUCCESSFUL migration:** the
 schema is now the new schema, and the new app's own code is what's
@@ -254,11 +262,24 @@ this whole procedure exists to avoid. Recovery:
 2. Prefer fixing forward (the new code is correct for the new schema;
    most startup failures here are config issues - a missing/wrong env
    var, a permissions problem - not the migration itself).
-3. Only if a full rollback is truly necessary: revert the migration by
-   hand (SQL above) or restore the backup, THEN checkout the old commit,
+3. Only if a full DB rollback is truly necessary: **prefer restoring the
+   step-3 pre-migration dump** (`pg_restore -d clog --clean
+   /var/backups/clog-pre-migration-002-<timestamp>.dump`, as `postgres`)
+   over manually reversing the schema with SQL. A simple "drop the new
+   columns, restore `PRIMARY KEY (token_id)`" is NOT universally safe to
+   present as a first option here: if the canary deployment has been live
+   even briefly, real deployment-scoped rows may already exist - a HOOD
+   profile and a canary profile can legitimately share the same
+   `token_id` (e.g. both have their own tokenId 1) once the composite key
+   is what's keeping them apart. Collapsing back to a bare `token_id`
+   primary key at that point can fail outright (a duplicate-key
+   violation) or silently keep only one of two real, distinct rows -
+   restoring the dump avoids this entirely, since it recreates the exact
+   pre-migration data, not a schema hand-reversal that assumes no new
+   rows were ever written under the new key shape. Once the DB is back to
+   its pre-migration state (dump restored), checkout the old commit,
    rebuild, and start the old app - the same full procedure as the
-   migration-failure case above, since both end in the same state
-   (pre-migration schema, pre-rollout code).
+   migration-failure case above.
 
 ## Health verification
 
