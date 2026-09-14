@@ -41,20 +41,26 @@ export const LEGACY_HOOD_DEPLOYMENT: DeploymentIdentity = {
  * never remove or repurpose an existing entry once it has been used in a
  * live base URI, for the same reason LEGACY_HOOD_DEPLOYMENT itself is
  * never repurposed.
+ *
+ * "canary-v1" is deliberately NOT a second hardcoded address here - it
+ * derives from env.chainId/env.tickerRegistry, which themselves come
+ * directly from the tracked deployment manifest
+ * (deployments/robinhood-mainnet.json, imported once in env.ts - see that
+ * file's own docs). The deployed canary TickerNFT's own immutable base URI
+ * is https://clog.run/api/ticker-metadata/canary-v1/, which this app's
+ * active deployment (the manifest) IS the canary - so "canary-v1" and "the
+ * active deployment" are, correctly, the exact same underlying value,
+ * read once, never duplicated. This is what makes drift between the two
+ * structurally impossible rather than merely unlikely: there is only ever
+ * one place (the manifest) either value could come from.
  */
-const KNOWN_DEPLOYMENTS: Record<string, DeploymentIdentity> = {
-  "canary-v1": {
-    chainId: 4663,
-    // Placeholder until the fresh canary TickerRegistry is actually
-    // deployed - see the deployment runbook. Update this one line, and
-    // only this line, once the real address is known; nothing else in
-    // this file or its callers needs to change.
-    tickerRegistryAddress: "0x0000000000000000000000000000000000000000",
-  },
+const KNOWN_DEPLOYMENTS: Record<string, () => DeploymentIdentity | null> = {
+  "canary-v1": () => getActiveDeployment(),
 };
 
 export function getKnownDeploymentById(deploymentId: string): DeploymentIdentity | null {
-  return KNOWN_DEPLOYMENTS[deploymentId] ?? null;
+  const resolver = KNOWN_DEPLOYMENTS[deploymentId];
+  return resolver ? resolver() : null;
 }
 
 /**

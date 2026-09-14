@@ -110,10 +110,20 @@ check_getter() {
 check_value() {
   # For non-address return values (uint256 subscription id, bytes32 keyHash)
   # - compared as-given by cast, not address-normalized.
+  #
+  # BUG FIXED: cast call's own uint256 output appends a human-readable
+  # scientific-notation annotation for large values, e.g.
+  # "83568090110973637554258631175012043155383488095251779152218551458964868806531 [8.356e76]"
+  # - comparing this verbatim against the manifest's own plain decimal
+  # value produced a false MISMATCH even when the actual integer was
+  # identical. Strip a trailing " [...]" annotation (if present - bytes32
+  # output never has one, so this is a harmless no-op there) before
+  # comparing, so only the real integer token is ever compared.
   local label="$1" addr="$2" sig="$3" expected="$4" rpc="$5"
   local actual
   actual=$(cast call "$addr" "$sig" --rpc-url "$rpc" 2>&1 || echo "CALL_FAILED")
-  actual_norm=$(echo "$actual" | tr 'A-F' 'a-f')
+  actual_stripped=$(echo "$actual" | sed -E 's/ \[[0-9.e+]+\]$//')
+  actual_norm=$(echo "$actual_stripped" | tr 'A-F' 'a-f')
   expected_norm=$(echo "$expected" | tr 'A-F' 'a-f')
   if [ "$actual" = "CALL_FAILED" ]; then
     fail "$label: call failed entirely (function may not exist, or RPC error) - raw: $actual"
@@ -144,30 +154,77 @@ check_value "VRFWrapperOnArbitrum.subscriptionId()" "$ARBITRUM_WRAPPER" "subscri
 check_value "VRFWrapperOnArbitrum.keyHash()" "$ARBITRUM_WRAPPER" "keyHash()(bytes32)" "$EXPECTED_VRF_KEY_HASH" "$ARBITRUM_RPC_URL"
 echo ""
 
-echo "=== Determining deploymentBlock (binary search on TickerRegistry code presence - never guessed) ==="
-LATEST=$(cast block-number --rpc-url "$ROBINHOOD_RPC_URL")
-LO=1
-HI="$LATEST"
-# Invariant: code does NOT exist at LO-1 (or LO-1 doesn't exist / is genesis),
-# code DOES exist at HI. Standard binary search for the first block where
-# code is present.
-while [ "$LO" -lt "$HI" ]; do
-  MID=$(( (LO + HI) / 2 ))
-  code_at_mid=$(cast code "$TICKER_REGISTRY" --rpc-url "$ROBINHOOD_RPC_URL" --block "$MID")
-  if [ "$code_at_mid" = "0x" ]; then
-    LO=$((MID + 1))
+echo "=== Determining deploymentBlock (never guessed, never assumed to be 'current block') ==="
+# BUG FIXED: the previous approach (binary search via cast code --block N)
+# requires an ARCHIVE node - querying historical state at an arbitrary past
+# block. Against the standard public Robinhood Chain RPC (not an archive
+# endpoint), this failed outright with "metadata is not found, <block>" -
+# confirmed directly from a real run, not a guess about node capability.
+# Transaction RECEIPTS (unlike arbitrary historical state) are commonly
+# retained even by non-archive nodes, so this now determines the block via
+# the real TickerRegistry deployment transaction's own receipt instead -
+# either a directly-supplied tx hash (most trustworthy - the actual
+# protocol deployment transaction itself) or, failing that, the block
+# explorer's own indexed contract-creation record cross-checked against a
+# real receipt lookup on the RPC itself (never trusted from the explorer
+# alone, unverified).
+DEPLOYMENT_BLOCK=""
+
+if [ -n "${TICKER_REGISTRY_DEPLOY_TX_HASH:-}" ]; then
+  echo "Using supplied TICKER_REGISTRY_DEPLOY_TX_HASH: $TICKER_REGISTRY_DEPLOY_TX_HASH"
+  receipt_block=$(cast receipt "$TICKER_REGISTRY_DEPLOY_TX_HASH" --rpc-url "$ROBINHOOD_RPC_URL" blockNumber 2>&1) || receipt_block=""
+  if [ -n "$receipt_block" ] && [[ "$receipt_block" =~ ^[0-9]+$ ]]; then
+    DEPLOYMENT_BLOCK="$receipt_block"
+    pass "Resolved deploymentBlock $DEPLOYMENT_BLOCK from the real deployment transaction's own receipt"
   else
-    HI="$MID"
+    fail "TICKER_REGISTRY_DEPLOY_TX_HASH was supplied but its receipt could not be read (raw: $receipt_block) - check the hash is correct and confirmed"
   fi
-done
-echo "Deployment block for TickerRegistry: $LO"
-echo "VERIFIED_DEPLOYMENT_BLOCK=$LO"
-echo "Set deployments/robinhood-mainnet.json's \"deploymentBlock\" to $LO (or a few blocks earlier for safety margin against off-by-one) once this whole script reports zero failures."
+else
+  echo "No TICKER_REGISTRY_DEPLOY_TX_HASH supplied - falling back to the block explorer's own indexed creation-transaction record."
+  if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    explorer_response=$(curl -s "https://robinhoodchain.blockscout.com/api/v2/addresses/${TICKER_REGISTRY}" 2>&1) || explorer_response=""
+    creation_tx_hash=$(echo "$explorer_response" | jq -r '.creation_tx_hash // .creator_tx_hash // empty' 2>/dev/null)
+    if [ -n "$creation_tx_hash" ] && [ "$creation_tx_hash" != "null" ]; then
+      echo "Block explorer reports creation tx: $creation_tx_hash - cross-checking against a real receipt lookup on the RPC itself (never trusted from the explorer alone)"
+      receipt_block=$(cast receipt "$creation_tx_hash" --rpc-url "$ROBINHOOD_RPC_URL" blockNumber 2>&1) || receipt_block=""
+      if [ -n "$receipt_block" ] && [[ "$receipt_block" =~ ^[0-9]+$ ]]; then
+        DEPLOYMENT_BLOCK="$receipt_block"
+        pass "Resolved deploymentBlock $DEPLOYMENT_BLOCK from the explorer-indexed creation tx, confirmed via a real RPC receipt lookup"
+      else
+        fail "Block explorer's creation_tx_hash ($creation_tx_hash) could not be confirmed via a real RPC receipt lookup (raw: $receipt_block)"
+      fi
+    else
+      echo "Block explorer response did not include a creation transaction hash (raw response head: $(echo "$explorer_response" | head -c 200))"
+    fi
+  else
+    echo "curl/jq not available - cannot query the block explorer's indexed data."
+  fi
+fi
+
+if [ -z "$DEPLOYMENT_BLOCK" ]; then
+  echo ""
+  echo "COULD NOT DETERMINE deploymentBlock via any trustworthy source available to this script."
+  echo "This is NOT treated as a deployment failure - it means neither a supplied tx hash nor the"
+  echo "block explorer's indexed data resolved it. To fix: re-run with the real deployment"
+  echo "transaction hash set explicitly:"
+  echo "  TICKER_REGISTRY_DEPLOY_TX_HASH=0x... ./scripts/verify-deployment.sh"
+  echo "Never fall back to guessing or to \"the current block\" - an unset deploymentBlock correctly"
+  echo "keeps the frontend in its safe \"not configured\" state (see lib/web3/env.ts's"
+  echo "isProtocolConfigured) rather than silently scanning from the wrong point."
+else
+  echo "VERIFIED_DEPLOYMENT_BLOCK=$DEPLOYMENT_BLOCK"
+  echo "Set deployments/robinhood-mainnet.json's \"deploymentBlock\" to $DEPLOYMENT_BLOCK once this whole script reports zero failures."
+fi
 echo ""
 
 echo "=== Summary ==="
 if [ "$FAILURES" -eq 0 ]; then
-  echo "All checks passed (both chains, every cross-contract and cross-chain reference verified). Fill in deploymentBlock ($LO) and re-run before treating the manifest as fully verified."
+  echo "All checks passed (both chains, every cross-contract and cross-chain reference verified)."
+  if [ -n "$DEPLOYMENT_BLOCK" ]; then
+    echo "Fill in deploymentBlock ($DEPLOYMENT_BLOCK) before treating the manifest as fully verified."
+  else
+    echo "deploymentBlock could not be resolved this run (see above) - supply TICKER_REGISTRY_DEPLOY_TX_HASH and re-run before treating the manifest as fully verified."
+  fi
   exit 0
 else
   echo "$FAILURES check(s) FAILED. Do not treat this manifest as verified, do not point clog.run at it, until every failure above is understood and resolved."
