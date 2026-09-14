@@ -172,12 +172,48 @@ DEPLOYMENT_BLOCK=""
 
 if [ -n "${TICKER_REGISTRY_DEPLOY_TX_HASH:-}" ]; then
   echo "Using supplied TICKER_REGISTRY_DEPLOY_TX_HASH: $TICKER_REGISTRY_DEPLOY_TX_HASH"
-  receipt_block=$(cast receipt "$TICKER_REGISTRY_DEPLOY_TX_HASH" --rpc-url "$ROBINHOOD_RPC_URL" blockNumber 2>&1) || receipt_block=""
-  if [ -n "$receipt_block" ] && [[ "$receipt_block" =~ ^[0-9]+$ ]]; then
-    DEPLOYMENT_BLOCK="$receipt_block"
-    pass "Resolved deploymentBlock $DEPLOYMENT_BLOCK from the real deployment transaction's own receipt"
+  # Full JSON receipt, not individual field-flag calls - avoids re-parsing
+  # cast's own human-readable per-field formatting (the exact class of bug
+  # check_value's subscriptionId fix above just addressed) by going
+  # straight through jq for unambiguous extraction of all three fields at
+  # once.
+  receipt_json=$(cast receipt "$TICKER_REGISTRY_DEPLOY_TX_HASH" --rpc-url "$ROBINHOOD_RPC_URL" --json 2>&1) || receipt_json=""
+  if [ -z "$receipt_json" ] || ! echo "$receipt_json" | jq -e . >/dev/null 2>&1; then
+    fail "TICKER_REGISTRY_DEPLOY_TX_HASH was supplied but its receipt could not be fetched or parsed (raw: $receipt_json)"
   else
-    fail "TICKER_REGISTRY_DEPLOY_TX_HASH was supplied but its receipt could not be read (raw: $receipt_block) - check the hash is correct and confirmed"
+    receipt_status=$(echo "$receipt_json" | jq -r '.status')
+    receipt_contract_address=$(echo "$receipt_json" | jq -r '.contractAddress')
+    receipt_block=$(echo "$receipt_json" | jq -r '.blockNumber')
+    # status is 0x1 (success) or 0x0 (failure) in the raw JSON-RPC
+    # representation cast --json passes through - checked exactly, not
+    # inferred from any human-readable rendering.
+    status_ok=false
+    [ "$receipt_status" = "0x1" ] && status_ok=true
+    contract_ok=false
+    [ -n "$receipt_contract_address" ] && [ "$(echo "$receipt_contract_address" | tr 'A-F' 'a-f')" = "$(echo "$TICKER_REGISTRY" | tr 'A-F' 'a-f')" ] && contract_ok=true
+
+    if [ "$status_ok" != "true" ]; then
+      fail "Deployment tx $TICKER_REGISTRY_DEPLOY_TX_HASH has status=$receipt_status, not success (0x1) - this is NOT a successful deployment receipt"
+    elif [ "$contract_ok" != "true" ]; then
+      fail "Deployment tx $TICKER_REGISTRY_DEPLOY_TX_HASH's own contractAddress ($receipt_contract_address) does not match the manifest's TickerRegistry ($TICKER_REGISTRY) - this tx did not deploy the contract the manifest claims"
+    else
+      pass "Deployment tx status=success, contractAddress matches manifest TickerRegistry exactly"
+      block_decimal=$((receipt_block))
+      # EXPECTED_DEPLOYMENT_BLOCK is an optional extra cross-check - if the
+      # operator has an independently-claimed block number (e.g. from their
+      # own deployment logs), this hard-fails on any mismatch rather than
+      # silently accepting the receipt's own number without comparison.
+      if [ -n "${EXPECTED_DEPLOYMENT_BLOCK:-}" ] && [ "$block_decimal" != "$EXPECTED_DEPLOYMENT_BLOCK" ]; then
+        fail "Deployment tx's real blockNumber ($block_decimal) does NOT match EXPECTED_DEPLOYMENT_BLOCK ($EXPECTED_DEPLOYMENT_BLOCK) - do not trust the claimed value over the receipt"
+      else
+        DEPLOYMENT_BLOCK="$block_decimal"
+        if [ -n "${EXPECTED_DEPLOYMENT_BLOCK:-}" ]; then
+          pass "Resolved deploymentBlock $DEPLOYMENT_BLOCK from the real deployment transaction's own receipt - matches EXPECTED_DEPLOYMENT_BLOCK exactly"
+        else
+          pass "Resolved deploymentBlock $DEPLOYMENT_BLOCK from the real deployment transaction's own receipt"
+        fi
+      fi
+    fi
   fi
 else
   echo "No TICKER_REGISTRY_DEPLOY_TX_HASH supplied - falling back to the block explorer's own indexed creation-transaction record."
