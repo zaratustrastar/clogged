@@ -1,6 +1,7 @@
 import type { PublicClient, Address } from "viem";
 import { eligibilityRegistryAbi } from "./abis/eligibilityRegistry.js";
 import { bondingCurveClogAbi } from "./abis/bondingCurveClog.js";
+import { scanBlockRangeInChunks } from "./blockRangeChunker.js";
 
 // Extracted once as standalone event ABI items (not the full contract ABI)
 // specifically so scanForTradeActivity can query them via client.getLogs()
@@ -88,7 +89,8 @@ export class TokenWatchlist {
   private constructor(
     private client: PublicClient,
     private eligibilityRegistry: Address,
-    startBlock: bigint
+    startBlock: bigint,
+    private chunkSizeBlocks: bigint = 2000n
   ) {
     this.lastScannedRegistrationBlock = startBlock;
     this.lastScannedTradeBlock = startBlock;
@@ -97,9 +99,19 @@ export class TokenWatchlist {
   /** One-time reconstruction from real event + state history -
    * deploymentBlock is the manifest's own verified value (see config.ts),
    * never genesis, and never a guess. The O(known tokens) aboveThresholdSince
-   * reads here are a bounded, one-time startup cost - not a per-poll one. */
-  static async build(client: PublicClient, eligibilityRegistry: Address, deploymentBlock: bigint): Promise<TokenWatchlist> {
-    const watchlist = new TokenWatchlist(client, eligibilityRegistry, deploymentBlock);
+   * reads here are a bounded, one-time startup cost - not a per-poll one.
+   * chunkSizeBlocks bounds every eth_getLogs call this instance ever makes
+   * (see blockRangeChunker.ts) - what actually keeps the initial
+   * deploymentBlock -> latest scan safe against RPC providers that cap
+   * block range/log count per call, however large that range has grown
+   * by the time this runs. */
+  static async build(
+    client: PublicClient,
+    eligibilityRegistry: Address,
+    deploymentBlock: bigint,
+    chunkSizeBlocks: bigint = 2000n
+  ): Promise<TokenWatchlist> {
+    const watchlist = new TokenWatchlist(client, eligibilityRegistry, deploymentBlock, chunkSizeBlocks);
     await watchlist.scanForNewTokens();
     await watchlist.seedInitialThresholdState();
     return watchlist;
@@ -114,9 +126,10 @@ export class TokenWatchlist {
   static withKnownTokens(
     client: PublicClient,
     eligibilityRegistry: Address,
-    tokens: { tokenId: bigint; market: Address; aboveThresholdSince?: bigint }[]
+    tokens: { tokenId: bigint; market: Address; aboveThresholdSince?: bigint }[],
+    chunkSizeBlocks: bigint = 2000n
   ): TokenWatchlist {
-    const watchlist = new TokenWatchlist(client, eligibilityRegistry, 0n);
+    const watchlist = new TokenWatchlist(client, eligibilityRegistry, 0n, chunkSizeBlocks);
     for (const { tokenId, market, aboveThresholdSince } of tokens) {
       watchlist.knownTokenIds.add(tokenId);
       watchlist.marketToTokenId.set(market.toLowerCase() as Address, tokenId);
@@ -148,22 +161,27 @@ export class TokenWatchlist {
     }
   }
 
-  /** Incremental only - scans exactly the block range since the last scan.
-   * New tokens get one seed read each (unavoidable - there is no event for
-   * "this token's initial aboveThresholdSince"), a bounded, small cost
-   * proportional to how many NEW tokens launched since last poll, never the
-   * full historical count. */
+  /** Scans the block range since the last check - bounded internally by
+   * blockRangeChunker.ts's shared chunking, since this same method serves
+   * both the initial (potentially large) deploymentBlock -> latest
+   * startup scan and every ordinary small incremental poll. New tokens
+   * get one seed read each (unavoidable - there is no event for "this
+   * token's initial aboveThresholdSince"), a bounded cost proportional to
+   * how many tokens are newly discovered in this call, never the full
+   * historical count. */
   async scanForNewTokens(): Promise<number> {
     const latest = await this.client.getBlockNumber();
     if (latest < this.lastScannedRegistrationBlock) return 0; // defensive: a reorg-shortened chain view
 
-    const logs = await this.client.getContractEvents({
-      address: this.eligibilityRegistry,
-      abi: eligibilityRegistryAbi,
-      eventName: "TokenRegistered",
-      fromBlock: this.lastScannedRegistrationBlock,
-      toBlock: latest,
-    });
+    const logs = await scanBlockRangeInChunks(this.lastScannedRegistrationBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+      this.client.getContractEvents({
+        address: this.eligibilityRegistry,
+        abi: eligibilityRegistryAbi,
+        eventName: "TokenRegistered",
+        fromBlock: chunkFrom,
+        toBlock: chunkTo,
+      })
+    );
 
     let added = 0;
     for (const log of logs) {
@@ -213,16 +231,20 @@ export class TokenWatchlist {
     }
 
     const [boughtLogs, soldLogs] = await Promise.all([
-      this.client.getLogs({
-        event: BOUGHT_EVENT as never,
-        fromBlock: this.lastScannedTradeBlock,
-        toBlock: latest,
-      }),
-      this.client.getLogs({
-        event: SOLD_EVENT as never,
-        fromBlock: this.lastScannedTradeBlock,
-        toBlock: latest,
-      }),
+      scanBlockRangeInChunks(this.lastScannedTradeBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+        this.client.getLogs({
+          event: BOUGHT_EVENT as never,
+          fromBlock: chunkFrom,
+          toBlock: chunkTo,
+        })
+      ),
+      scanBlockRangeInChunks(this.lastScannedTradeBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+        this.client.getLogs({
+          event: SOLD_EVENT as never,
+          fromBlock: chunkFrom,
+          toBlock: chunkTo,
+        })
+      ),
     ]);
 
     const tradedTokenIds = new Set<bigint>();

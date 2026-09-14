@@ -252,6 +252,36 @@ simulate a full process restart (a brand new ledger instance against the
 same real event history) and confirm the identical outstanding work is
 found again.
 
+## Bounded block-range chunking (RPC provider limits)
+
+Neither `TokenWatchlist`'s nor `RoundLedger`'s startup reconstruction
+requests the entire `deploymentBlock -> latest` range in a single
+`eth_getLogs` call, even though both need to see that entire range at
+least once. Many real RPC providers cap the block range or log count a
+single call may span/return - often undocumented, and different from
+provider to provider - so an unbounded single call that works fine early
+in the protocol's life eventually breaks as history grows, independent
+of the address-count fix already applied to trade-event scanning.
+
+`src/blockRangeChunker.ts`'s `scanBlockRangeInChunks` is the one shared
+place both classes walk a block range in bounded pieces (configurable via
+`KEEPER_LOG_CHUNK_BLOCKS`, default 2000 blocks) - contiguous,
+non-overlapping chunks by construction (chunk N+1 always starts at chunk
+N's end + 1), so every block in range is covered exactly once. The exact
+same method serves both the large initial startup scan and every small
+ordinary incremental poll - chunking an already-small range just produces
+a single chunk, so there's no separate "small range" code path to keep in
+sync.
+
+See `test/blockRangeChunker.test.ts` for the chunker's own direct proofs
+(no gap/duplicate at boundaries; chunked results equal one conceptual
+full-range call), and the "chunked historical reconstruction" tests in
+`test/tokenWatchlist.test.ts`/`test/roundLedger.test.ts` for the same
+proof at the class level - a chunked reconstruction and a single-call
+reconstruction of the identical fake history produce identical resulting
+state, and a small-chunk-size restart still finds registrations/rounds
+from the very start of a long history.
+
 ## Required keeper balances
 
 Two separate ETH balances, on two separate chains, both funded manually

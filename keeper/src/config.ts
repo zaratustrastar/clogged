@@ -85,6 +85,17 @@ export interface KeeperConfig {
   /** How often the keeper loop runs, in milliseconds. */
   pollIntervalMs: number;
 
+  /** Maximum number of blocks requested in a single eth_getLogs call, for
+   * every historical/incremental log scan (TokenWatchlist, RoundLedger).
+   * Real RPC providers vary in what block range/log count they'll accept
+   * in one call, and this keeper has no way to know a given provider's
+   * own limit in advance - see blockRangeChunker.ts for the shared
+   * chunking this bounds. Conservative default deliberately well under
+   * common provider caps (many enforce something in the 2,000-10,000
+   * block range); lower it further via KEEPER_LOG_CHUNK_BLOCKS if a
+   * specific provider needs it. */
+  logChunkSizeBlocks: bigint;
+
   /** Below this ETH balance (in wei), fundingHealth logs a WARNING for the
    * given address - see README.md's "no automatic funding in v1" note:
    * this NEVER triggers an automatic transfer, only a log line an operator
@@ -151,6 +162,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): KeeperConfig
     arbitrumVrfSubscriptionId: BigInt(manifest["$notReadByFrontend"].arbitrumVrfSubscriptionId),
     arbitrumVrfKeyHash: manifest["$notReadByFrontend"].arbitrumVrfKeyHash,
     pollIntervalMs: Number(process.env.KEEPER_POLL_INTERVAL_MS || 30_000),
+    logChunkSizeBlocks: BigInt(process.env.KEEPER_LOG_CHUNK_BLOCKS || "2000"),
     lowBalanceWarningThresholdWei: BigInt(process.env.KEEPER_LOW_BALANCE_WARNING_WEI || "5000000000000000"), // 0.005 ETH default
     lockFilePath: process.env.KEEPER_LOCK_FILE || path.join(__dirname, "../.keeper-lock.json"),
   };

@@ -68,8 +68,7 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
     });
   });
 
-  describe("scanForNewEvents() - incremental event-driven reconstruction", () => {
-    it("a new RoundClosed event adds the round to the ledger", async () => {
+  describe("scanForNewEvents() - incremental event-driven reconstruction", () => {    it("a new RoundClosed event adds the round to the ledger", async () => {
       const { clients } = makeMockClients({});
       (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
         async ({ eventName }: { eventName: string }) =>
@@ -129,6 +128,72 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
       expect(capturedFromBlock).toBe(500n); // the manifest's real verified deploymentBlock, never genesis
       expect(ledger.needsRandomnessRetry()).toEqual([3n]);
+    });
+  });
+
+  describe("chunked historical reconstruction (bounded block-range chunker)", () => {
+    /** A tiny fake chain: RoundClosed/RandomnessRequested/RoundSettled
+     * events spread across a wide block range, keyed by which block they
+     * "happened" at - used to simulate a real getContractEvents call that
+     * only returns logs actually within the requested [fromBlock, toBlock]
+     * window, so a chunked scan is forced to genuinely combine multiple
+     * chunks to see the full picture, exactly as a real RPC provider that
+     * caps block range per call would behave. */
+    function makeFakeChainClient(latestBlock: bigint) {
+      const events: { block: bigint; eventName: string; args: Record<string, unknown> }[] = [
+        { block: 100n, eventName: "RoundClosed", args: { roundId: 1n, drawSkipped: false } },
+        { block: 2_500n, eventName: "RoundClosed", args: { roundId: 2n, drawSkipped: false } },
+        { block: 2_600n, eventName: "RandomnessRequested", args: { roundId: 2n, requestId: 10n } },
+        { block: 5_800n, eventName: "RoundClosed", args: { roundId: 3n, drawSkipped: true } },
+        { block: 9_950n, eventName: "RoundClosed", args: { roundId: 4n, drawSkipped: false } },
+        { block: 9_960n, eventName: "RandomnessRequested", args: { roundId: 4n, requestId: 11n } },
+        { block: 9_970n, eventName: "RoundSettled", args: { roundId: 4n } },
+      ];
+
+      return {
+        getBlockNumber: async () => latestBlock,
+        getContractEvents: async ({ eventName, fromBlock, toBlock }: { eventName: string; fromBlock: bigint; toBlock: bigint }) =>
+          events
+            .filter((e) => e.eventName === eventName && e.block >= fromBlock && e.block <= toBlock)
+            .map((e) => ({ args: e.args })),
+      } as unknown as Parameters<typeof RoundLedger.build>[0];
+    }
+
+    it("REQUIREMENT: historical reconstruction over multiple chunks produces the same state as one conceptual full-history scan", async () => {
+      // Small chunk size (1000 blocks) against a 10,000-block history
+      // forces 10 chunks per event type - the events above are
+      // deliberately spread so several land in different chunks.
+      const chunkedClient = makeFakeChainClient(10_000n);
+      const chunkedLedger = await RoundLedger.build(chunkedClient, ROUND_MANAGER, 0n, 1000n);
+
+      // The "one conceptual full-history scan" - a single chunk covering
+      // the entire range in one call, for direct comparison.
+      const fullRangeClient = makeFakeChainClient(10_000n);
+      const fullRangeLedger = await RoundLedger.build(fullRangeClient, ROUND_MANAGER, 0n, 1_000_000n);
+
+      expect(chunkedLedger.needsRandomnessRetry()).toEqual(fullRangeLedger.needsRandomnessRetry());
+      expect(chunkedLedger.needsRelayCheck()).toEqual(fullRangeLedger.needsRelayCheck());
+      expect(chunkedLedger.outstandingRequested()).toEqual(fullRangeLedger.outstandingRequested());
+      expect(chunkedLedger.outstandingCount).toBe(fullRangeLedger.outstandingCount);
+
+      // Concretely: round 1 (never requested) needs a retry; round 2 is
+      // requested and awaiting relay; round 3 was drawSkipped, needs
+      // nothing; round 4 settled, tracked nowhere at all - identical in
+      // both the chunked and single-call reconstructions.
+      expect(chunkedLedger.needsRandomnessRetry()).toEqual([1n]);
+      expect(chunkedLedger.needsRelayCheck()).toEqual([{ roundId: 2n, requestId: 10n }]);
+    });
+
+    it("REQUIREMENT: restart reconstructs old unresolved rounds correctly even when the history requires multiple chunks", async () => {
+      // Simulates a real restart against a long chain history: a fresh
+      // RoundLedger.build with a small chunk size must still find round 1
+      // (closed at block 100, near the very start of a 10,000-block
+      // history) exactly as reliably as the most recent rounds.
+      const client = makeFakeChainClient(10_000n);
+      const ledger = await RoundLedger.build(client, ROUND_MANAGER, 0n, 500n); // 20 chunks
+
+      expect(ledger.needsRandomnessRetry()).toContain(1n);
+      expect(ledger.needsRandomnessRetry()).toEqual([1n]);
     });
   });
 });

@@ -1,5 +1,6 @@
 import type { PublicClient, Address } from "viem";
 import { roundManagerAbi } from "./abis/roundManager.js";
+import { scanBlockRangeInChunks } from "./blockRangeChunker.js";
 
 /**
  * Tracks which rounds have unresolved randomness/relay work outstanding,
@@ -57,7 +58,8 @@ export class RoundLedger {
   private constructor(
     private client: PublicClient,
     private roundManager: Address,
-    startBlock: bigint
+    startBlock: bigint,
+    private chunkSizeBlocks: bigint = 2000n
   ) {
     this.lastScannedBlock = startBlock;
   }
@@ -66,9 +68,18 @@ export class RoundLedger {
    * the manifest's own verified value, never genesis, never a guess. This
    * is what makes a restart safe with no fixed horizon: chain state/events
    * are the source of truth every time, not memory that could have missed
-   * something while the process was down. */
-  static async build(client: PublicClient, roundManager: Address, deploymentBlock: bigint): Promise<RoundLedger> {
-    const ledger = new RoundLedger(client, roundManager, deploymentBlock);
+   * something while the process was down. chunkSizeBlocks bounds every
+   * eth_getLogs call this instance ever makes (see blockRangeChunker.ts) -
+   * what keeps the initial deploymentBlock -> latest scan safe against RPC
+   * providers that cap block range/log count per call, however large that
+   * range has grown by the time this runs. */
+  static async build(
+    client: PublicClient,
+    roundManager: Address,
+    deploymentBlock: bigint,
+    chunkSizeBlocks: bigint = 2000n
+  ): Promise<RoundLedger> {
+    const ledger = new RoundLedger(client, roundManager, deploymentBlock, chunkSizeBlocks);
     await ledger.scanForNewEvents();
     return ledger;
   }
@@ -83,9 +94,10 @@ export class RoundLedger {
       closedRounds?: { roundId: bigint; drawSkipped: boolean }[];
       requestedRounds?: { roundId: bigint; requestId: bigint }[];
       settledRounds?: bigint[];
-    }
+    },
+    chunkSizeBlocks: bigint = 2000n
   ): RoundLedger {
-    const ledger = new RoundLedger(client, roundManager, 0n);
+    const ledger = new RoundLedger(client, roundManager, 0n, chunkSizeBlocks);
     for (const { roundId, drawSkipped } of state.closedRounds ?? []) {
       ledger.closedRounds.set(roundId, { drawSkipped });
     }
@@ -98,37 +110,46 @@ export class RoundLedger {
     return ledger;
   }
 
-  /** Incremental only - scans exactly the block range since the last
-   * check, across all relevant event types, against RoundManager's single
-   * fixed address (no market-count-style scaling concern here at all -
-   * this is always exactly 3 getLogs calls, regardless of how many
-   * rounds have ever existed). */
+  /** Scans the block range since the last check, across all relevant
+   * event types, against RoundManager's single fixed address (no
+   * market-count-style scaling concern here at all - this is always
+   * exactly 3 getLogs-family calls per invocation, regardless of how many
+   * rounds have ever existed). Bounded internally by
+   * blockRangeChunker.ts's shared chunking, since this same method serves
+   * both the initial (potentially large) deploymentBlock -> latest
+   * startup scan and every ordinary small incremental poll. */
   async scanForNewEvents(): Promise<void> {
     const latest = await this.client.getBlockNumber();
     if (latest < this.lastScannedBlock) return; // defensive: a reorg-shortened chain view
 
     const [closedLogs, requestedLogs, settledLogs] = await Promise.all([
-      this.client.getContractEvents({
-        address: this.roundManager,
-        abi: roundManagerAbi,
-        eventName: "RoundClosed",
-        fromBlock: this.lastScannedBlock,
-        toBlock: latest,
-      }),
-      this.client.getContractEvents({
-        address: this.roundManager,
-        abi: roundManagerAbi,
-        eventName: "RandomnessRequested",
-        fromBlock: this.lastScannedBlock,
-        toBlock: latest,
-      }),
-      this.client.getContractEvents({
-        address: this.roundManager,
-        abi: roundManagerAbi,
-        eventName: "RoundSettled",
-        fromBlock: this.lastScannedBlock,
-        toBlock: latest,
-      }),
+      scanBlockRangeInChunks(this.lastScannedBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+        this.client.getContractEvents({
+          address: this.roundManager,
+          abi: roundManagerAbi,
+          eventName: "RoundClosed",
+          fromBlock: chunkFrom,
+          toBlock: chunkTo,
+        })
+      ),
+      scanBlockRangeInChunks(this.lastScannedBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+        this.client.getContractEvents({
+          address: this.roundManager,
+          abi: roundManagerAbi,
+          eventName: "RandomnessRequested",
+          fromBlock: chunkFrom,
+          toBlock: chunkTo,
+        })
+      ),
+      scanBlockRangeInChunks(this.lastScannedBlock, latest, this.chunkSizeBlocks, (chunkFrom, chunkTo) =>
+        this.client.getContractEvents({
+          address: this.roundManager,
+          abi: roundManagerAbi,
+          eventName: "RoundSettled",
+          fromBlock: chunkFrom,
+          toBlock: chunkTo,
+        })
+      ),
     ]);
 
     for (const log of closedLogs) {
