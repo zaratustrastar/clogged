@@ -170,87 +170,115 @@ no unique or exclusion constraint matching the ON CONFLICT specification`,
 since `token_id` alone is no longer a unique constraint after the PK
 change). This is a hard failure the instant the migration completes, not
 a mere compatibility risk - so `migrate` must never run while the old app
-is still serving traffic, and `build` must never run while blocking a
-schema cutover that's waiting on it.
+is still serving traffic.
 
-**Sequence - build first, migrate+restart together, minimal stop window:**
+**This sequence favors correctness over zero downtime, on purpose.** An
+earlier version of this runbook built the new app while the old app was
+still running, on the theory that a build only writes files and doesn't
+touch the schema. That's true of the schema, but not of `.next/` itself:
+a running Next.js production server can still read server chunks and
+static build artifacts from `.next/` at request time, and rebuilding that
+same directory underneath a live process can produce transient missing
+or mismatched artifacts - a real risk, not merely a theoretical one. This
+rollout accepts a short, controlled maintenance window instead: the app
+is stopped BEFORE the build even starts, not just before the migration.
+No symlink/release-directory (e.g. blue-green, `current` → timestamped
+release dirs) architecture is introduced to avoid this - that's more
+machinery than a canary rollout needs; a few minutes of downtime, done in
+the right order, is the simpler and safer choice here.
+
+**Sequence - backup while healthy, pull source only, then a single stop/build/migrate/start window:**
 
 ```bash
 cd /opt/clogged
 
-# 1. Pull the new source - the currently-running OLD compiled app (.next/
-#    from its own prior build) keeps serving correctly throughout this
-#    step and the next one: Node already has the old code loaded in
-#    memory: overwriting source files on disk does not affect a process
-#    that already started.
-git pull origin main
-
-# (npm ci only if package.json/package-lock.json changed - it hasn't in
-# this rollout's diff)
-npm ci
-
-# 2. Build the NEW app while the OLD app is still running and still
-#    serving all traffic correctly. This is the step that used to run
-#    AFTER migrate - moving it first is the actual fix: the build window
-#    (which can take real time) no longer overlaps with any schema change
-#    at all.
-sudo -u clog npm run build
-
-# 3. Optional but recommended: back up the DB before any schema change,
-#    and confirm connectivity/read access first. Runs as the `postgres`
-#    superuser, not the `clog` Unix user - there is no guarantee the
-#    `clog` Unix account can authenticate as a matching Postgres role,
-#    and `postgres` can always read/dump any local database regardless.
+# 1. Back up the DB while the OLD app is still healthy and serving -
+#    this touches only Postgres, never the app or its files, so it's
+#    safe to do before anything else. Runs as the `postgres` superuser,
+#    not the `clog` Unix user - there is no guarantee the `clog` Unix
+#    account can authenticate as a matching Postgres role, and
+#    `postgres` can always read/dump any local database regardless.
 sudo -u postgres pg_dump -Fc clog > /var/backups/clog-pre-migration-002-$(date +%Y%m%d%H%M%S).dump
 sudo -u postgres psql -d clog -c "SELECT count(*) FROM token_profiles;"   # read-only sanity check
 
-# 4. Stop the app. This IS the downtime window - old app writes cannot
-#    fail against a schema it never sees, because it isn't running.
+# 2. Pull new source only - do NOT build yet. The old compiled app
+#    (.next/ from its own prior build) keeps serving correctly: Node
+#    already has the old code loaded in memory, and overwriting source
+#    files on disk does not affect a process that already started, or
+#    the .next/ directory it's currently reading from.
+git pull origin main
+# package.json/package-lock.json did not change in this rollout's diff,
+# so npm ci is unnecessary here - included only for completeness if a
+# future rollout's diff does change dependencies:
+# npm ci
+
+# 3. Begin controlled downtime. Stop the OLD app before building the NEW
+#    one - not after. This is the actual fix: a build must never run
+#    while a live process is still reading .next/ out from underneath it.
 sudo systemctl stop clog
 
-# 5. Run the migration now, with no app running at all.
-sudo -u clog node --env-file=.env.production scripts/migrate.mjs
+# 4. Build the NEW app now that nothing is reading the old .next/ anymore.
+sudo -u clog npm run build
 # CHECK THE EXIT CODE before doing anything else:
+echo "build exit code: $?"
+
+# 5. Only if step 4 succeeded: run the migration - see below if it didn't.
+sudo -u clog node --env-file=.env.production scripts/migrate.mjs
 echo "migration exit code: $?"
 
-# 6. Only if step 5 succeeded (exit code 0): start the app immediately -
-#    it's already built from step 2, so this is just a process start, not
-#    a rebuild. The gap between "schema changed" and "compatible app
-#    running" is just this one command.
+# 6. Only if step 5 succeeded: start the app.
 sudo systemctl start clog
-sudo systemctl status clog
+sudo systemctl status clog --no-pager
 
 # 7. Health + metadata smoke tests - see below.
 ```
 
-**If migration (step 5) fails:** `scripts/migrate.mjs` runs every
+**Failure ordering - three distinct points, three distinct recoveries:**
+
+**If the build (step 4) fails:** the DB has not been touched at all - the
+migration hasn't run yet. Do NOT migrate. Recovery:
+1. Inspect the build's own error output.
+2. If fixable quickly (a config issue, a missed dependency), fix and
+   re-run step 4.
+3. If serving traffic again matters more than finishing this rollout
+   right now: recover the previous source and build, then restart the
+   old app - `git checkout <previous known-good commit>` (whatever `main`
+   pointed at before step 2's pull), `npm ci` (only if needed),
+   `sudo -u clog npm run build`, `sudo systemctl start clog`. A full
+   rebuild is required - there is no shortcut once the working tree has
+   moved past the old commit, and the failed build may have left `.next/`
+   in a partial, inconsistent state that a plain restart can't recover
+   from on its own.
+
+**If the migration (step 5) fails:** `scripts/migrate.mjs` runs every
 migration file inside its own `BEGIN`/`COMMIT`, with an explicit
 `ROLLBACK` in its `catch` block before re-throwing (confirmed directly
 against the script's own source, not assumed) - a failure partway through
 migration 002's SQL is automatically rolled back by Postgres itself. The
 normal recovery state is already the old schema; there is nothing to
-manually reverse as the first response. The app is also currently stopped
-(real downtime, but a safe state - no code is running against a
-half-migrated or mismatched schema). Recovery:
+manually reverse as the first response. Do NOT start the new app until
+this is resolved - the newly-built app's own queries expect the NEW
+schema (the composite key, the two new columns), so starting it against
+a rolled-back OLD schema would just trade one hard failure for another.
+Recovery:
 1. Inspect the actual error from `scripts/migrate.mjs`'s own output - the
    transaction is already gone, so this is purely diagnostic.
 2. Confirm the schema is genuinely still the old one:
    `sudo -u postgres psql -d clog -c "\d token_profiles"` should show the
    original single-column `token_id` primary key, with no `chain_id`/
-   `ticker_registry_address` columns - if so, no DB action is needed at
-   all before deciding what to do next.
+   `ticker_registry_address` columns.
 3. If the migration is safe to retry (e.g. a transient DB connection
-   issue, not a real schema conflict), fix the cause and re-run step 5.
+   issue, not a real schema conflict), fix the cause and re-run step 5 -
+   the app is already stopped and the new build is already in place, so
+   this is just re-running one command.
 4. If serving traffic again before a fix is ready matters more than
-   completing this rollout right now: the old schema is already in place
-   (per step 2's confirmation), so just rebuild and start the OLD app:
-   `git checkout main` (or whatever commit was running before this
-   rollout), `npm ci`, `sudo -u clog npm run build`,
-   `sudo systemctl start clog`. This full rebuild is the cost of
-   returning to the old app after step 1 already pulled new source -
-   there is no shortcut that avoids it once the working tree has moved
-   past the old commit; it is NOT needed to fix the schema itself, which
-   the automatic rollback already handled.
+   completing this rollout right now: the schema is already back to old
+   (per step 2's confirmation above), so bring the OLD app/OLD schema
+   back into sync together - `git checkout <previous known-good commit>`,
+   `npm ci` (only if needed), `sudo -u clog npm run build`,
+   `sudo systemctl start clog`. Do not start the already-built NEW app
+   against the rolled-back OLD schema; its own queries are not
+   compatible with it either.
 
 **If the app fails to start (step 6) after a SUCCESSFUL migration:** the
 schema is now the new schema, and the new app's own code is what's
@@ -263,7 +291,7 @@ this whole procedure exists to avoid. Recovery:
    most startup failures here are config issues - a missing/wrong env
    var, a permissions problem - not the migration itself).
 3. Only if a full DB rollback is truly necessary: **prefer restoring the
-   step-3 pre-migration dump** (`pg_restore -d clog --clean
+   step-1 pre-migration dump** (`pg_restore -d clog --clean
    /var/backups/clog-pre-migration-002-<timestamp>.dump`, as `postgres`)
    over manually reversing the schema with SQL. A simple "drop the new
    columns, restore `PRIMARY KEY (token_id)`" is NOT universally safe to
@@ -277,9 +305,11 @@ this whole procedure exists to avoid. Recovery:
    restoring the dump avoids this entirely, since it recreates the exact
    pre-migration data, not a schema hand-reversal that assumes no new
    rows were ever written under the new key shape. Once the DB is back to
-   its pre-migration state (dump restored), checkout the old commit,
-   rebuild, and start the old app - the same full procedure as the
-   migration-failure case above.
+   its pre-migration state (dump restored), bring the code back in sync
+   with it too: checkout the old commit, rebuild, and start the old app -
+   restoring the DB alone while the new app stays running would put the
+   new code in front of the old schema, the exact mismatch this whole
+   procedure exists to prevent.
 
 ## Health verification
 
