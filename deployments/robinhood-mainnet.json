@@ -1,0 +1,27 @@
+{
+  "$comment": "Public, non-secret Robinhood Chain Mainnet deployment identity for clog.run. Tracked in git deliberately - see docs/DEPLOYMENTS.md for why (this exists specifically so a stale .env.production on the VPS can never silently override which deployment the frontend reads from after a git pull). Contains ONLY public contract addresses, chain id, and deployment block - never secrets, never a database URL, never a signer key. Edit this file (and only this file) to point the frontend at a different deployment; no other source file should ever hardcode a contract address.",
+
+  "chainId": 4663,
+
+  "deploymentBlock": null,
+
+  "contracts": {
+    "tickerRegistry": "0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2",
+    "tickerNFT": "0x9fbe11934c968298e2CaA76F738C8e8f81378b35",
+    "eligibilityRegistry": "0xeC6772973F0Bb73557A02361B7749F4063812E21",
+    "roundManager": "0x6396892Ea85D12b14272E584552e213147a3AAf6",
+    "rewardVault": "0xd2A133004D932404CE159AAd4E900501673C5Dc2"
+  },
+
+  "$notReadByFrontend": {
+    "$comment": "Recorded for operational completeness and for scripts/verify-deployment.sh's own cross-contract checks. Never read by the Next.js app itself - see POST_DEPLOY_HANDOFF.md for exactly which five addresses (plus chainId/deploymentBlock) the frontend actually uses.",
+    "chainlinkRandomnessProvider": "0x4bB627192D56091f6ac0E17c179d608bf3eDDA0c",
+    "arbitrumVrfWrapper": "0x476d0e97dD7EA31e07D2362470CEF18B5fe394d8"
+  },
+
+  "$verification": {
+    "$comment": "NOT independently verified on-chain as of this file's creation - see docs/DEPLOYMENTS.md. Run scripts/verify-deployment.sh against a real RPC endpoint before treating this file as trustworthy, and fill in deploymentBlock (above, currently null) from its output before pointing clog.run at this deployment.",
+    "verifiedAt": null,
+    "verifiedBy": null
+  }
+}

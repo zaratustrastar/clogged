@@ -394,10 +394,15 @@ cast call <ChainlinkRandomnessProvider address> "wrapperOnArbitrum()(address)" -
 ## PHASE M — Frontend env handoff
 
 Populate the five frontend contract addresses + deployment block in
-`/opt/clogged/.env.production` (see `POST_DEPLOY_HANDOFF.md` for the exact
-list and sequence). No ABI regeneration is needed merely because addresses
-changed — ABIs are keyed by contract shape, not address. Then, on the VPS:
-`npm run build` (required — these are `NEXT_PUBLIC_*` values, baked in at
+`deployments/robinhood-mainnet.json` (see `docs/DEPLOYMENTS.md` and
+`POST_DEPLOY_HANDOFF.md` for the exact list and sequence — this moved from
+`.env.production` to a tracked manifest specifically so a stale
+`.env.production` on the VPS can never silently override a real deployment
+after a `git pull`; run `scripts/verify-deployment.sh` first). No ABI
+regeneration is needed merely because addresses changed — ABIs are keyed by
+contract shape, not address. Then, commit + push the manifest and, on the
+VPS: `git pull origin main` then `npm run build` (required — these values
+are baked in at
 build time) followed by `sudo systemctl restart clog` (see
 `VPS_RUNBOOK.md`).
 
