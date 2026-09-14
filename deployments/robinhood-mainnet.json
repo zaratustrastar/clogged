@@ -14,9 +14,11 @@
   },
 
   "$notReadByFrontend": {
-    "$comment": "Recorded for operational completeness and for scripts/verify-deployment.sh's own cross-contract checks. Never read by the Next.js app itself - see POST_DEPLOY_HANDOFF.md for exactly which five addresses (plus chainId/deploymentBlock) the frontend actually uses.",
+    "$comment": "Recorded for operational completeness and for scripts/verify-deployment.sh's own cross-contract/cross-chain checks. Never read by the Next.js app itself - see POST_DEPLOY_HANDOFF.md for exactly which five addresses (plus chainId/deploymentBlock) the frontend actually uses.",
     "chainlinkRandomnessProvider": "0x4bB627192D56091f6ac0E17c179d608bf3eDDA0c",
-    "arbitrumVrfWrapper": "0x476d0e97dD7EA31e07D2362470CEF18B5fe394d8"
+    "arbitrumVrfWrapper": "0x476d0e97dD7EA31e07D2362470CEF18B5fe394d8",
+    "arbitrumVrfSubscriptionId": "83568090110973637554258631175012043155383488095251779152218551458964868806531",
+    "arbitrumVrfKeyHash": "0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409"
   },
 
   "$verification": {

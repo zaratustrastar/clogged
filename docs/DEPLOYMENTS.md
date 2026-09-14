@@ -72,23 +72,36 @@ already true before this change and remains true after it — only *where*
 ## Verifying a manifest before trusting it
 
 `deployments/robinhood-mainnet.json` records addresses as configuration —
-whoever edits it is asserting these are correct, not proving it.
-`scripts/verify-deployment.sh` is the actual proof: a read-only script
-(only `cast call`/`cast code`/`cast block-number` — never sends a
-transaction, never needs a private key) that:
+whoever edits it is asserting these are correct, not proving it. The
+deployed system spans two chains (Robinhood Chain and Arbitrum One, via the
+Chainlink CCIP/VRF randomness path), so verification has to cover both, not
+just the five frontend addresses. `scripts/verify-deployment.sh` is the
+actual proof: a read-only script (only `cast call`/`cast code`/`cast
+block-number`/`cast chain-id` — never sends a transaction, never needs a
+private key, on either chain) that:
 
-1. Confirms real contract code exists at all six addresses (five on
-   Robinhood Chain, the Arbitrum wrapper on Arbitrum One).
-2. Confirms the cross-contract getters each contract actually exposes
-   (`TickerRegistry.eligibilityRegistry()`, `TickerRegistry.tickerNFT()`,
-   `TickerNFT.tickerRegistry()`, `RoundManager.engine()`,
-   `RewardVault.roundManager()`) point at exactly the other addresses the
-   manifest claims — this is what catches two addresses accidentally
-   swapped in the manifest, which "code exists" alone never would.
+1. Confirms real contract code exists at every address on both chains: the
+   five Robinhood Chain contracts plus `ChainlinkRandomnessProvider`, and
+   the `VRFWrapperOnArbitrum` on Arbitrum One.
+2. Confirms every cross-contract getter each contract actually exposes
+   points at exactly what the manifest claims — on Robinhood Chain:
+   `TickerRegistry.eligibilityRegistry()`, `.tickerNFT()`, `.winnerPot()`
+   (which is the RewardVault address — see `TickerRegistry.sol`'s own
+   constructor), `TickerNFT.tickerRegistry()`, `RoundManager.engine()`,
+   `.randomnessProvider()`, `.rewardVault()`, `RewardVault.roundManager()`,
+   `EligibilityRegistry.roundManager()`,
+   `ChainlinkRandomnessProvider.roundManager()`, `.wrapperOnArbitrum()` —
+   and the cross-chain half, on Arbitrum One:
+   `VRFWrapperOnArbitrum.providerOnRobinhoodChain()` (must point back at
+   the Robinhood-side provider), plus `.subscriptionId()` and `.keyHash()`
+   matching the deployed canary's real Chainlink VRF subscription
+   configuration. This is what catches an address (or VRF config value)
+   accidentally swapped or mismatched in the manifest, which "code exists"
+   alone would never catch.
 3. Determines the real deployment block via binary search on
-   `TickerRegistry`'s own code presence across block history — never
-   assumed to be "whatever the current block happens to be" and never
-   otherwise guessed.
+   `TickerRegistry`'s own code presence across Robinhood Chain's block
+   history — never assumed to be "whatever the current block happens to
+   be" and never otherwise guessed.
 
 Run it wherever there is real RPC access to both chains (this repository's
 own sandboxed preparation environment has neither — see the PR/commit this

@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
 # Read-only verification of deployments/robinhood-mainnet.json against the
-# real, live chain. Makes ONLY eth_call/eth_getCode/eth_getBlockByNumber-style
-# reads via `cast` - never sends a transaction, never needs a private key.
+# real, live chain - BOTH chains, since the deployed system spans Robinhood
+# Chain and Arbitrum One. Makes ONLY eth_call/eth_getCode/eth_getBlockByNumber
+# -style reads via `cast` - never sends a transaction, never needs a private
+# key, on either chain.
 #
 # WHY THIS EXISTS: the addresses in deployments/robinhood-mainnet.json were
 # supplied as configuration, not independently verified on-chain by whoever
 # wrote that file - see docs/DEPLOYMENTS.md. This script performs the actual
-# verification: confirms real contract code exists at each address, confirms
-# the cross-contract getters each contract exposes actually point at each
-# other exactly as the manifest claims (catching a copy-paste swap between
-# two addresses, which "code exists" alone can never catch), and determines
+# verification: confirms real contract code exists at every address on both
+# chains, confirms the cross-contract getters each contract exposes actually
+# point at each other exactly as the manifest claims (catching a copy-paste
+# swap between two addresses, which "code exists" alone can never catch),
+# confirms the Arbitrum wrapper's own VRF subscription/keyHash configuration
+# matches the deployed canary's real VRF setup, and determines
 # deploymentBlock from real chain data via binary search on TickerRegistry's
 # own code presence - never guessed, never assumed to be "current block".
 #
-# Requires `cast` (part of Foundry - https://getfoundry.sh). Run wherever
-# there is real RPC access to Robinhood Chain Mainnet and Arbitrum One (the
-# sandboxed environment used to prepare this script has neither - see this
-# repo's own commit history / PR description for that caveat stated
-# up front, not discovered after the fact).
+# Requires `cast` (part of Foundry - https://getfoundry.sh) and `jq`. Run
+# wherever there is real RPC access to Robinhood Chain Mainnet AND Arbitrum
+# One (the sandboxed environment used to prepare this script has neither -
+# see this repo's own commit history / PR description for that caveat
+# stated up front, not discovered after the fact).
 #
 # Usage:
 #   ./scripts/verify-deployment.sh
-#   ROBINHOOD_RPC_URL=https://your-provider/... ./scripts/verify-deployment.sh
+#   ROBINHOOD_RPC_URL=https://your-provider/... ARBITRUM_RPC_URL=https://your-provider/... ./scripts/verify-deployment.sh
 
 set -euo pipefail
 
@@ -41,18 +45,26 @@ ROUND_MANAGER=$(jq -r '.contracts.roundManager' "$MANIFEST")
 REWARD_VAULT=$(jq -r '.contracts.rewardVault' "$MANIFEST")
 CHAINLINK_PROVIDER=$(jq -r '.["$notReadByFrontend"].chainlinkRandomnessProvider' "$MANIFEST")
 ARBITRUM_WRAPPER=$(jq -r '.["$notReadByFrontend"].arbitrumVrfWrapper' "$MANIFEST")
+EXPECTED_VRF_SUBSCRIPTION_ID=$(jq -r '.["$notReadByFrontend"].arbitrumVrfSubscriptionId' "$MANIFEST")
+EXPECTED_VRF_KEY_HASH=$(jq -r '.["$notReadByFrontend"].arbitrumVrfKeyHash' "$MANIFEST")
 EXPECTED_CHAIN_ID=$(jq -r '.chainId' "$MANIFEST")
 
 FAILURES=0
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "PASS: $1"; }
 
-echo "=== Chain ID ==="
-ACTUAL_CHAIN_ID=$(cast chain-id --rpc-url "$ROBINHOOD_RPC_URL")
-if [ "$ACTUAL_CHAIN_ID" = "$EXPECTED_CHAIN_ID" ]; then
-  pass "RPC reports chain id $ACTUAL_CHAIN_ID, matches manifest"
+echo "=== Chain IDs ==="
+ACTUAL_ROBINHOOD_CHAIN_ID=$(cast chain-id --rpc-url "$ROBINHOOD_RPC_URL")
+if [ "$ACTUAL_ROBINHOOD_CHAIN_ID" = "$EXPECTED_CHAIN_ID" ]; then
+  pass "Robinhood RPC reports chain id $ACTUAL_ROBINHOOD_CHAIN_ID, matches manifest"
 else
-  fail "RPC reports chain id $ACTUAL_CHAIN_ID, manifest says $EXPECTED_CHAIN_ID"
+  fail "Robinhood RPC reports chain id $ACTUAL_ROBINHOOD_CHAIN_ID, manifest says $EXPECTED_CHAIN_ID"
+fi
+ACTUAL_ARBITRUM_CHAIN_ID=$(cast chain-id --rpc-url "$ARBITRUM_RPC_URL")
+if [ "$ACTUAL_ARBITRUM_CHAIN_ID" = "42161" ]; then
+  pass "Arbitrum RPC reports chain id $ACTUAL_ARBITRUM_CHAIN_ID (Arbitrum One)"
+else
+  fail "Arbitrum RPC reports chain id $ACTUAL_ARBITRUM_CHAIN_ID, expected 42161 (Arbitrum One)"
 fi
 echo ""
 
@@ -78,7 +90,6 @@ else
 fi
 echo ""
 
-echo "=== Cross-contract getters match the manifest exactly ==="
 check_getter() {
   local label="$1" addr="$2" sig="$3" expected="$4" rpc="$5"
   local actual
@@ -96,20 +107,41 @@ check_getter() {
   fi
 }
 
+check_value() {
+  # For non-address return values (uint256 subscription id, bytes32 keyHash)
+  # - compared as-given by cast, not address-normalized.
+  local label="$1" addr="$2" sig="$3" expected="$4" rpc="$5"
+  local actual
+  actual=$(cast call "$addr" "$sig" --rpc-url "$rpc" 2>&1 || echo "CALL_FAILED")
+  actual_norm=$(echo "$actual" | tr 'A-F' 'a-f')
+  expected_norm=$(echo "$expected" | tr 'A-F' 'a-f')
+  if [ "$actual" = "CALL_FAILED" ]; then
+    fail "$label: call failed entirely (function may not exist, or RPC error) - raw: $actual"
+  elif [ "$actual_norm" = "$expected_norm" ]; then
+    pass "$label matches ($expected)"
+  else
+    fail "$label MISMATCH: expected $expected, got $actual"
+  fi
+}
+
+echo "=== Cross-contract getters (Robinhood Chain) ==="
 check_getter "TickerRegistry.eligibilityRegistry()" "$TICKER_REGISTRY" "eligibilityRegistry()(address)" "$ELIGIBILITY_REGISTRY" "$ROBINHOOD_RPC_URL"
 check_getter "TickerRegistry.tickerNFT()" "$TICKER_REGISTRY" "tickerNFT()(address)" "$TICKER_NFT" "$ROBINHOOD_RPC_URL"
+check_getter "TickerRegistry.winnerPot()" "$TICKER_REGISTRY" "winnerPot()(address)" "$REWARD_VAULT" "$ROBINHOOD_RPC_URL"
 check_getter "TickerNFT.tickerRegistry()" "$TICKER_NFT" "tickerRegistry()(address)" "$TICKER_REGISTRY" "$ROBINHOOD_RPC_URL"
 check_getter "RoundManager.engine()" "$ROUND_MANAGER" "engine()(address)" "$ELIGIBILITY_REGISTRY" "$ROBINHOOD_RPC_URL"
+check_getter "RoundManager.randomnessProvider()" "$ROUND_MANAGER" "randomnessProvider()(address)" "$CHAINLINK_PROVIDER" "$ROBINHOOD_RPC_URL"
+check_getter "RoundManager.rewardVault()" "$ROUND_MANAGER" "rewardVault()(address)" "$REWARD_VAULT" "$ROBINHOOD_RPC_URL"
 check_getter "RewardVault.roundManager()" "$REWARD_VAULT" "roundManager()(address)" "$ROUND_MANAGER" "$ROBINHOOD_RPC_URL"
+check_getter "EligibilityRegistry.roundManager()" "$ELIGIBILITY_REGISTRY" "roundManager()(address)" "$ROUND_MANAGER" "$ROBINHOOD_RPC_URL"
+check_getter "ChainlinkRandomnessProvider.roundManager()" "$CHAINLINK_PROVIDER" "roundManager()(address)" "$ROUND_MANAGER" "$ROBINHOOD_RPC_URL"
+check_getter "ChainlinkRandomnessProvider.wrapperOnArbitrum()" "$CHAINLINK_PROVIDER" "wrapperOnArbitrum()(address)" "$ARBITRUM_WRAPPER" "$ROBINHOOD_RPC_URL"
 echo ""
 
-echo "=== Wiring checks (informational - address(0) is EXPECTED if governance hasn't wired these yet) ==="
-eligibility_round_manager=$(cast call "$ELIGIBILITY_REGISTRY" "roundManager()(address)" --rpc-url "$ROBINHOOD_RPC_URL" 2>&1 || echo "CALL_FAILED")
-echo "EligibilityRegistry.roundManager() = $eligibility_round_manager (expected: $ROUND_MANAGER once RoundManager.setRoundManager wiring is complete)"
-provider_round_manager=$(cast call "$CHAINLINK_PROVIDER" "roundManager()(address)" --rpc-url "$ROBINHOOD_RPC_URL" 2>&1 || echo "CALL_FAILED")
-echo "ChainlinkRandomnessProvider.roundManager() = $provider_round_manager (expected: $ROUND_MANAGER once wired)"
-provider_wrapper=$(cast call "$CHAINLINK_PROVIDER" "wrapperOnArbitrum()(address)" --rpc-url "$ROBINHOOD_RPC_URL" 2>&1 || echo "CALL_FAILED")
-echo "ChainlinkRandomnessProvider.wrapperOnArbitrum() = $provider_wrapper (expected: $ARBITRUM_WRAPPER once wired)"
+echo "=== Cross-chain getters (Arbitrum One -> Robinhood Chain references) ==="
+check_getter "VRFWrapperOnArbitrum.providerOnRobinhoodChain()" "$ARBITRUM_WRAPPER" "providerOnRobinhoodChain()(address)" "$CHAINLINK_PROVIDER" "$ARBITRUM_RPC_URL"
+check_value "VRFWrapperOnArbitrum.subscriptionId()" "$ARBITRUM_WRAPPER" "subscriptionId()(uint256)" "$EXPECTED_VRF_SUBSCRIPTION_ID" "$ARBITRUM_RPC_URL"
+check_value "VRFWrapperOnArbitrum.keyHash()" "$ARBITRUM_WRAPPER" "keyHash()(bytes32)" "$EXPECTED_VRF_KEY_HASH" "$ARBITRUM_RPC_URL"
 echo ""
 
 echo "=== Determining deploymentBlock (binary search on TickerRegistry code presence - never guessed) ==="
@@ -129,12 +161,13 @@ while [ "$LO" -lt "$HI" ]; do
   fi
 done
 echo "Deployment block for TickerRegistry: $LO"
+echo "VERIFIED_DEPLOYMENT_BLOCK=$LO"
 echo "Set deployments/robinhood-mainnet.json's \"deploymentBlock\" to $LO (or a few blocks earlier for safety margin against off-by-one) once this whole script reports zero failures."
 echo ""
 
 echo "=== Summary ==="
 if [ "$FAILURES" -eq 0 ]; then
-  echo "All hard checks passed. Review the wiring checks above (address(0) there is expected pre-governance-wiring), then fill in deploymentBlock and re-run before treating the manifest as verified."
+  echo "All checks passed (both chains, every cross-contract and cross-chain reference verified). Fill in deploymentBlock ($LO) and re-run before treating the manifest as fully verified."
   exit 0
 else
   echo "$FAILURES check(s) FAILED. Do not treat this manifest as verified, do not point clog.run at it, until every failure above is understood and resolved."
