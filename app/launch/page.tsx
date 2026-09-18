@@ -78,13 +78,20 @@ export default function LaunchPage() {
 
   const phase: LaunchPhase = (launch.phase ?? "idle") as LaunchPhase;
 
+  // Runbook §0: useTickerAvailability's real return is NOT an AsyncState
+  // (no .isLoading/.data at all) - it's a discriminated union
+  // ({status: "idle"|"checking"|"available"|"taken"|"reserved"} |
+  // {status: "invalid", reason}) that already does its own debouncing and
+  // length/charset validation internally (confirmed directly against
+  // useProtocolActions.ts). Mapped 1:1 onto TickerSlot's own Availability
+  // union (status -> kind; "reserved" - CLOG's own reserved ticker - reads
+  // as "taken", since Availability has no separate reserved state).
   const avail: Availability =
-    ticker.length === 0 ? { kind: "idle" }
-    : ticker.length < 3 ? { kind: "invalid", reason: "3–10 characters" }
-    : availability.isLoading ? { kind: "checking" }
-    : availability.data?.available ? { kind: "available" }
-    : availability.data ? { kind: "taken" }
-    : { kind: "idle" };
+    availability.status === "idle" ? { kind: "idle" }
+    : availability.status === "checking" ? { kind: "checking" }
+    : availability.status === "available" ? { kind: "available" }
+    : availability.status === "invalid" ? { kind: "invalid", reason: availability.reason }
+    : { kind: "taken" }; // "taken" or "reserved"
 
   const canSubmit = avail.kind === "available" && name.trim().length > 0;
   const revealCountdown = launch.revealAt ? formatCountdown(new Date(launch.revealAt).toISOString(), now) : null;

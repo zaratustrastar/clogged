@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
-import { MachineMarquee, type MarqueeStat } from "./MachineMarquee";
+import { MachineMarquee, type MarqueeStat } from "@/components/landing/MachineMarquee"; // handoff's own file lives under components/landing/, not alongside this file - the relative "./MachineMarquee" was wrong
 
 /* Replaces Navbar + StatsTicker. The marquee is riveted to the top of the cabinet.
  * Wire stats from useRoundStatus() — pass "—" for anything still loading and OMIT
