@@ -25,6 +25,7 @@ export function makeTestConfig(overrides: Partial<KeeperConfig> = {}): KeeperCon
     arbitrumVrfKeyHash: ("0x" + "ab".repeat(32)) as `0x${string}`,
     pollIntervalMs: 30_000,
     logChunkSizeBlocks: 2000n,
+    rpcPacingDelayMs: 0,
     lowBalanceWarningThresholdWei: 5_000_000_000_000_000n,
     lockFilePath: "/tmp/clog-keeper-test-lock.json",
     ...overrides,

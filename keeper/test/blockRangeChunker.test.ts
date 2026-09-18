@@ -106,4 +106,61 @@ describe("scanBlockRangeInChunks", () => {
     await expect(scanBlockRangeInChunks(0n, 100n, 0n, async () => [])).rejects.toThrow(/chunkSizeBlocks must be positive/);
     await expect(scanBlockRangeInChunks(0n, 100n, -5n, async () => [])).rejects.toThrow(/chunkSizeBlocks must be positive/);
   });
+
+  describe("interChunkDelayMs pacing semantics", () => {
+    // A small real delay (not vi.useFakeTimers) - fast enough to keep the
+    // suite quick, large enough to reliably distinguish "a delay
+    // happened" from normal synchronous overhead between calls.
+    const DELAY_MS = 30;
+
+    it("REQUIREMENT: delay occurs between chunks only - never before the first, never after the last (chunk1, delay, chunk2, delay, chunk3, no trailing delay)", async () => {
+      const callTimestamps: number[] = [];
+      const start = Date.now();
+
+      await scanBlockRangeInChunks(0n, 2999n, 1000n, async () => {
+        callTimestamps.push(Date.now() - start);
+        return [];
+      }, DELAY_MS);
+      const totalElapsed = Date.now() - start;
+
+      expect(callTimestamps).toHaveLength(3); // 3 chunks: [0-999],[1000-1999],[2000-2999]
+
+      // No delay before the first fetch - it happens essentially
+      // immediately (well under one delay interval).
+      expect(callTimestamps[0]).toBeLessThan(DELAY_MS);
+      // A real delay elapsed BETWEEN chunk 1's fetch and chunk 2's fetch.
+      expect(callTimestamps[1] - callTimestamps[0]).toBeGreaterThanOrEqual(DELAY_MS * 0.8);
+      // A real delay elapsed BETWEEN chunk 2's fetch and chunk 3's fetch.
+      expect(callTimestamps[2] - callTimestamps[1]).toBeGreaterThanOrEqual(DELAY_MS * 0.8);
+      // NO trailing delay after the last (3rd) chunk's fetch - the whole
+      // function returns almost immediately afterward, not one more
+      // DELAY_MS later.
+      expect(totalElapsed - callTimestamps[2]).toBeLessThan(DELAY_MS);
+    });
+
+    it("a single-chunk scan never delays at all, regardless of interChunkDelayMs - there is no second chunk to pace against", async () => {
+      const start = Date.now();
+      await scanBlockRangeInChunks(0n, 500n, 2000n, async () => [], DELAY_MS);
+      expect(Date.now() - start).toBeLessThan(DELAY_MS);
+    });
+
+    it("interChunkDelayMs=0 (the default) never delays, even across many chunks", async () => {
+      const start = Date.now();
+      await scanBlockRangeInChunks(0n, 9999n, 1000n, async () => [], 0);
+      expect(Date.now() - start).toBeLessThan(DELAY_MS); // 10 chunks, still fast - no pacing applied
+    });
+
+    it("chunk boundaries remain exactly correct (contiguous, no gap, no duplicate) with pacing enabled - pacing never perturbs the range math", async () => {
+      const chunkRanges: { from: bigint; to: bigint }[] = [];
+      await scanBlockRangeInChunks(0n, 3_247n, 1000n, async (from, to) => {
+        chunkRanges.push({ from, to });
+        return [];
+      }, 1); // minimal real delay, just to prove it coexists correctly with the range math
+      expect(chunkRanges[0].from).toBe(0n);
+      for (let i = 1; i < chunkRanges.length; i++) {
+        expect(chunkRanges[i].from).toBe(chunkRanges[i - 1].to + 1n);
+      }
+      expect(chunkRanges[chunkRanges.length - 1].to).toBe(3_247n);
+    });
+  });
 });

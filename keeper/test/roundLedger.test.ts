@@ -70,9 +70,8 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
   describe("scanForNewEvents() - incremental event-driven reconstruction", () => {    it("a new RoundClosed event adds the round to the ledger", async () => {
       const { clients } = makeMockClients({});
-      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
-        async ({ eventName }: { eventName: string }) =>
-          eventName === "RoundClosed" ? [{ args: { roundId: 7n, drawSkipped: false } }] : []
+      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: () => Promise<unknown[]>) => void }).mockImplementation(
+        async () => [{ eventName: "RoundClosed", args: { roundId: 7n, drawSkipped: false } }]
       );
       const ledger = RoundLedger.withState(clients.robinhoodPublic, ROUND_MANAGER, {});
       await ledger.scanForNewEvents();
@@ -81,9 +80,8 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
     it("a new RandomnessRequested event records the round as requested", async () => {
       const { clients } = makeMockClients({});
-      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
-        async ({ eventName }: { eventName: string }) =>
-          eventName === "RandomnessRequested" ? [{ args: { roundId: 7n, requestId: 42n } }] : []
+      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: () => Promise<unknown[]>) => void }).mockImplementation(
+        async () => [{ eventName: "RandomnessRequested", args: { roundId: 7n, requestId: 42n } }]
       );
       const ledger = RoundLedger.withState(clients.robinhoodPublic, ROUND_MANAGER, {
         closedRounds: [{ roundId: 7n, drawSkipped: false }],
@@ -95,9 +93,8 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
     it("REQUIREMENT: a new RoundSettled event removes the round from every outstanding set (settled rounds are ignored/removed)", async () => {
       const { clients } = makeMockClients({});
-      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string }) => Promise<unknown[]>) => void }).mockImplementation(
-        async ({ eventName }: { eventName: string }) =>
-          eventName === "RoundSettled" ? [{ args: { roundId: 7n } }] : []
+      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: () => Promise<unknown[]>) => void }).mockImplementation(
+        async () => [{ eventName: "RoundSettled", args: { roundId: 7n } }]
       );
       const ledger = RoundLedger.withState(clients.robinhoodPublic, ROUND_MANAGER, {
         closedRounds: [{ roundId: 7n, drawSkipped: false }],
@@ -117,10 +114,10 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
     it("REQUIREMENT: restart reconstructs outstanding work correctly - RoundLedger.build performs one full scan from deploymentBlock", async () => {
       const { clients } = makeMockClients({});
       let capturedFromBlock: bigint | undefined;
-      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { eventName: string; fromBlock: bigint }) => Promise<unknown[]>) => void }).mockImplementation(
-        async ({ eventName, fromBlock }: { eventName: string; fromBlock: bigint }) => {
+      (clients.robinhoodPublic.getContractEvents as unknown as { mockImplementation: (fn: (args: { fromBlock: bigint }) => Promise<unknown[]>) => void }).mockImplementation(
+        async ({ fromBlock }: { fromBlock: bigint }) => {
           capturedFromBlock = fromBlock;
-          return eventName === "RoundClosed" ? [{ args: { roundId: 3n, drawSkipped: false } }] : [];
+          return [{ eventName: "RoundClosed", args: { roundId: 3n, drawSkipped: false } }];
         }
       );
 
@@ -152,10 +149,10 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
       return {
         getBlockNumber: async () => latestBlock,
-        getContractEvents: async ({ eventName, fromBlock, toBlock }: { eventName: string; fromBlock: bigint; toBlock: bigint }) =>
+        getContractEvents: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
           events
-            .filter((e) => e.eventName === eventName && e.block >= fromBlock && e.block <= toBlock)
-            .map((e) => ({ args: e.args })),
+            .filter((e) => e.block >= fromBlock && e.block <= toBlock)
+            .map((e) => ({ eventName: e.eventName, args: e.args })),
       } as unknown as Parameters<typeof RoundLedger.build>[0];
     }
 
@@ -194,6 +191,112 @@ describe("RoundLedger - event-driven state, no fixed lookback horizon", () => {
 
       expect(ledger.needsRandomnessRetry()).toContain(1n);
       expect(ledger.needsRandomnessRetry()).toEqual([1n]);
+    });
+  });
+
+  describe("RPC resilience: per-chunk 429/5xx retry (real VPS dry-run bug fix)", () => {
+    const FAST_RETRY = { maxAttempts: 4, baseDelayMs: 1, maxDelayMs: 5 };
+
+    /** Same fixed event set as makeFakeChainClient above, but tracks how
+     * many times getContractEvents was actually called for EACH distinct
+     * (fromBlock, toBlock) chunk range, and can be told to fail the first
+     * N calls for one specific chunk with a realistic 429-shaped error
+     * before succeeding - proving retry happens exactly at the chunk
+     * level, not by restarting the whole scan. */
+    function makeFlakyChainClient(
+      latestBlock: bigint,
+      opts: { failChunkFrom: bigint; failChunkTo: bigint; failTimes: number }
+    ) {
+      const events: { block: bigint; eventName: string; args: Record<string, unknown> }[] = [
+        { block: 100n, eventName: "RoundClosed", args: { roundId: 1n, drawSkipped: false } },
+        { block: 2_500n, eventName: "RoundClosed", args: { roundId: 2n, drawSkipped: false } },
+        { block: 2_600n, eventName: "RandomnessRequested", args: { roundId: 2n, requestId: 10n } },
+        { block: 5_800n, eventName: "RoundClosed", args: { roundId: 3n, drawSkipped: true } },
+        { block: 9_950n, eventName: "RoundClosed", args: { roundId: 4n, drawSkipped: false } },
+        { block: 9_960n, eventName: "RandomnessRequested", args: { roundId: 4n, requestId: 11n } },
+        { block: 9_970n, eventName: "RoundSettled", args: { roundId: 4n } },
+      ];
+      const callCountByChunk = new Map<string, number>();
+
+      return {
+        getBlockNumber: async () => latestBlock,
+        getContractEvents: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+          const key = `${fromBlock}-${toBlock}`;
+          const priorCalls = callCountByChunk.get(key) ?? 0;
+          callCountByChunk.set(key, priorCalls + 1);
+
+          if (fromBlock === opts.failChunkFrom && toBlock === opts.failChunkTo && priorCalls < opts.failTimes) {
+            // A realistic 429-shaped error, matching what the real
+            // Robinhood public RPC actually returned on the VPS dry-run
+            // that surfaced this bug - not a generic Error, so this also
+            // exercises isRetryableError's real message matching, not
+            // just a hand-picked string guaranteed to match.
+            throw new Error("HTTP request failed. Status: 429 Too Many Requests");
+          }
+
+          return events
+            .filter((e) => e.block >= fromBlock && e.block <= toBlock)
+            .map((e) => ({ eventName: e.eventName, args: e.args }));
+        },
+        callCountByChunk,
+      } as unknown as Parameters<typeof RoundLedger.build>[0] & { callCountByChunk: Map<string, number> };
+    }
+
+    it("REQUIREMENT (A): a middle chunk 429s once, only that chunk is retried, earlier successful chunks are not rescanned, and the reconstructed state is exactly correct", async () => {
+      // 10,000-block range / 1000-block chunks = 10 chunks: [0-999],
+      // [1000-1999], ..., [9000-9999]. The failing chunk (2000-2999)
+      // is neither the first nor the last - a genuine "middle chunk".
+      const client = makeFlakyChainClient(10_000n, { failChunkFrom: 2000n, failChunkTo: 2999n, failTimes: 1 });
+
+      const ledger = await RoundLedger.build(client, ROUND_MANAGER, 0n, 1000n, 0, FAST_RETRY);
+
+      // The failing chunk was called exactly twice (one failure + one
+      // successful retry) - never restarted from block 0, never retried
+      // more than the one genuine failure required.
+      expect(client.callCountByChunk.get("2000-2999")).toBe(2);
+      // Every OTHER chunk was called exactly once - confirms earlier
+      // (and later) successful chunks were never rescanned as a side
+      // effect of the one chunk's retry.
+      for (const [key, count] of client.callCountByChunk) {
+        if (key === "2000-2999") continue;
+        expect(count).toBe(1);
+      }
+
+      // Reconstructed state is exactly correct - identical to a full,
+      // no-failure scan (see the "same state as one conceptual
+      // full-history scan" test above): round 1 needs retry, round 2
+      // needs relay, round 3 (drawSkipped) needs nothing, round 4
+      // (settled) is tracked nowhere.
+      expect(ledger.needsRandomnessRetry()).toEqual([1n]);
+      expect(ledger.needsRelayCheck()).toEqual([{ roundId: 2n, requestId: 10n }]);
+      expect(ledger.outstandingRequested()).toEqual([2n]);
+      // No duplicate events: round 2's RandomnessRequested (in the SAME
+      // chunk that failed once) was recorded exactly once, not twice from
+      // the retry - a duplicate would still show requestId 10n here
+      // (Maps de-duplicate by key), but a genuinely broken retry that
+      // re-ran a DIFFERENT chunk twice could have produced extra, wrong
+      // entries elsewhere, which the exact equality checks above rule out.
+    });
+
+    it("REQUIREMENT (B): a chunk that 429s persistently exhausts retries at maxAttempts and fails clearly, without retrying forever", async () => {
+      // Always fails (failTimes: Infinity) - every single call to this
+      // chunk throws, so retry must stop at maxAttempts, not loop forever.
+      const client = makeFlakyChainClient(10_000n, { failChunkFrom: 2000n, failChunkTo: 2999n, failTimes: Infinity });
+
+      await expect(RoundLedger.build(client, ROUND_MANAGER, 0n, 1000n, 0, FAST_RETRY)).rejects.toThrow(/429/);
+
+      // Retried exactly maxAttempts times for the failing chunk - not
+      // fewer (would mean giving up early) and not more (would mean
+      // retrying past the configured limit).
+      expect(client.callCountByChunk.get("2000-2999")).toBe(FAST_RETRY.maxAttempts);
+    });
+
+    it("test-only overrides do not change the conservative production default when omitted: withState's own retryOptions match the real default exactly", () => {
+      // withState performs no scan itself, so this reads the default
+      // directly and cheaply, rather than inferring it from real retry
+      // timing (which would make this test slow for no extra value).
+      const ledger = RoundLedger.withState({} as unknown as Parameters<typeof RoundLedger.withState>[0], ROUND_MANAGER, {});
+      expect(ledger.retryOptionsForTesting).toEqual({ maxAttempts: 5, baseDelayMs: 1000, maxDelayMs: 15_000 });
     });
   });
 });

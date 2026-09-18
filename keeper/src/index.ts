@@ -103,7 +103,7 @@ async function main(): Promise<void> {
     logger.info("startup", "DRY-RUN MODE: no transaction will ever be sent, no lock file entry written for a dry-run action.");
   }
 
-  const watchlist = await TokenWatchlist.build(clients.robinhoodPublic, config.eligibilityRegistry, config.deploymentBlock, config.logChunkSizeBlocks);
+  const watchlist = await TokenWatchlist.build(clients.robinhoodPublic, config.eligibilityRegistry, config.deploymentBlock, config.logChunkSizeBlocks, config.rpcPacingDelayMs);
   logger.info(
     "startup",
     `token watchlist reconstructed from onchain event history: ${watchlist.size} known token(s), ${watchlist.activeStreakCount} with an active above-threshold streak right now`,
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   // event history starting at deploymentBlock - NO fixed lookback window,
   // so a round closed long before this process last ran is found exactly
   // the same way as a recent one (see roundLedger.ts's own docs).
-  const ledger = await RoundLedger.build(clients.robinhoodPublic, config.roundManager, config.deploymentBlock, config.logChunkSizeBlocks);
+  const ledger = await RoundLedger.build(clients.robinhoodPublic, config.roundManager, config.deploymentBlock, config.logChunkSizeBlocks, config.rpcPacingDelayMs);
   logger.info(
     "startup",
     `round ledger reconstructed from onchain event history: ${ledger.outstandingCount} closed round(s) tracked, ${ledger.needsRandomnessRetry().length} needing a randomness request, ${ledger.needsRelayCheck().length} awaiting relay`,

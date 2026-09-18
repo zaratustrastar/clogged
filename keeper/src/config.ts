@@ -55,6 +55,26 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/** Parses an optional env var as a non-negative integer, defaulting to 0
+ * when unset. Never silently coerces garbage into a number: `Number("abc")`
+ * is `NaN`, and `NaN > 0` is `false`, so an unvalidated `Number(env || "0")`
+ * would accept "abc" as if it meant 0 and cause silently wrong timing
+ * behavior downstream, rather than telling the operator their config value
+ * is invalid. A decimal like "1.5" or a negative value is rejected too -
+ * this is a millisecond delay, and neither has a sensible meaning here. */
+function parseNonNegativeIntEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return defaultValue;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `Invalid ${name}: "${raw}" - must be a non-negative integer (milliseconds), e.g. "0" or "250". ` +
+        `See keeper/README.md and keeper/.env.example.`
+    );
+  }
+  return value;
+}
+
 export interface KeeperConfig {
   dryRun: boolean;
 
@@ -110,6 +130,25 @@ export interface KeeperConfig {
    * block range); lower it further via KEEPER_LOG_CHUNK_BLOCKS if a
    * specific provider needs it. */
   logChunkSizeBlocks: bigint;
+
+  /** Optional pause (milliseconds) between consecutive chunk requests
+   * within a single historical/incremental scan (TokenWatchlist,
+   * RoundLedger) - see blockRangeChunker.ts's own docs. Complements
+   * per-chunk retry/backoff rather than replacing it: retry handles an
+   * occasional 429; this handles a provider that enforces a hard
+   * requests-per-second ceiling, where the requests themselves need
+   * spacing out, not just retrying after the fact. Default 0 (no added
+   * delay) - a real VPS dry-run's own 429 was traced to three concurrent
+   * chunked scans running at once (fixed directly - see roundLedger.ts),
+   * not to request rate alone, so this stays off by default and is meant
+   * to be turned on via KEEPER_RPC_PACING_MS only if a specific provider
+   * still needs it after that fix - retries remain the primary protection
+   * against a transient 429; this is optional RPC pressure relief on top
+   * of that, not a replacement for it. Validated by parseNonNegativeIntEnv:
+   * must be a non-negative integer if set at all - "abc", "-1", "1.5", and
+   * similar are rejected with a clear startup error rather than silently
+   * producing NaN or negative timing behavior. */
+  rpcPacingDelayMs: number;
 
   /** Below this ETH balance (in wei), fundingHealth logs a WARNING for the
    * given address - see README.md's "no automatic funding in v1" note:
@@ -194,6 +233,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): KeeperConfig
     arbitrumVrfKeyHash: manifest["$notReadByFrontend"].arbitrumVrfKeyHash,
     pollIntervalMs: Number(process.env.KEEPER_POLL_INTERVAL_MS || 30_000),
     logChunkSizeBlocks: BigInt(process.env.KEEPER_LOG_CHUNK_BLOCKS || "2000"),
+    rpcPacingDelayMs: parseNonNegativeIntEnv("KEEPER_RPC_PACING_MS", 0),
     lowBalanceWarningThresholdWei: BigInt(process.env.KEEPER_LOW_BALANCE_WARNING_WEI || "5000000000000000"), // 0.005 ETH default
     lockFilePath: process.env.KEEPER_LOCK_FILE || path.join(__dirname, "../.keeper-lock.json"),
   };

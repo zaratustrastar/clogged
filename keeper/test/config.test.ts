@@ -135,4 +135,43 @@ describe("keeper config loading", () => {
     const config = loadConfig([]);
     expect(config.deploymentBlock).toBe(61564258n);
   });
+
+  describe("KEEPER_RPC_PACING_MS validation", () => {
+    it("unset -> defaults to 0", () => {
+      delete process.env.KEEPER_RPC_PACING_MS;
+      expect(loadConfig([]).rpcPacingDelayMs).toBe(0);
+    });
+
+    it('"0" -> 0', () => {
+      process.env.KEEPER_RPC_PACING_MS = "0";
+      expect(loadConfig([]).rpcPacingDelayMs).toBe(0);
+    });
+
+    it("a positive integer -> accepted as-is", () => {
+      process.env.KEEPER_RPC_PACING_MS = "250";
+      expect(loadConfig([]).rpcPacingDelayMs).toBe(250);
+    });
+
+    it("a negative value -> rejected with a clear error, never silently accepted", () => {
+      process.env.KEEPER_RPC_PACING_MS = "-1";
+      expect(() => loadConfig([])).toThrow(/KEEPER_RPC_PACING_MS/);
+    });
+
+    it("a decimal value -> rejected (a millisecond delay has no fractional meaning here)", () => {
+      process.env.KEEPER_RPC_PACING_MS = "1.5";
+      expect(() => loadConfig([])).toThrow(/KEEPER_RPC_PACING_MS/);
+    });
+
+    it("garbage (non-numeric) -> rejected with a clear error, never silently coerced to NaN or 0", () => {
+      process.env.KEEPER_RPC_PACING_MS = "abc";
+      expect(() => loadConfig([])).toThrow(/KEEPER_RPC_PACING_MS/);
+    });
+
+    it("Infinity/NaN-shaped strings are also rejected, not just obviously-wrong ones", () => {
+      process.env.KEEPER_RPC_PACING_MS = "Infinity";
+      expect(() => loadConfig([])).toThrow(/KEEPER_RPC_PACING_MS/);
+      process.env.KEEPER_RPC_PACING_MS = "NaN";
+      expect(() => loadConfig([])).toThrow(/KEEPER_RPC_PACING_MS/);
+    });
+  });
 });

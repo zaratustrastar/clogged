@@ -282,6 +282,36 @@ reconstruction of the identical fake history produce identical resulting
 state, and a small-chunk-size restart still finds registrations/rounds
 from the very start of a long history.
 
+**Never concurrent streams, and never more than one event-type call per
+chunk.** A real keyless VPS dry-run hit `RoundLedger`'s own startup scan
+with a genuine `Too Many Requests` from the Robinhood public RPC - not
+because any individual chunk was too large (each was already a bounded
+2,000-block range), but because the scan ran `RoundClosed`/
+`RandomnessRequested`/`RoundSettled` as three separate chunked scans
+inside `Promise.all`, opening three simultaneous streams of chunked
+requests against the same RPC at once. `TokenWatchlist`'s own trade-event
+scan (`Bought`+`Sold`) had the identical structural weakness, even though
+it happened to succeed on that particular run. Fixed by consolidating
+each into a single multi-event scan per chunk - `getContractEvents`/
+`getLogs` called with every relevant event at once (no `eventName`
+filter, or an `events` array) rather than one call per event type -
+confirmed directly against viem's own source: this makes exactly one
+`eth_getLogs` call per chunk, with `topics[0]` as an array of every
+event's own signature hash (standard JSON-RPC "match any of these"
+behavior, not a viem-specific convenience issuing multiple underlying
+requests), and every returned log carries its own `.eventName` field for
+dispatch. `RoundLedger` now makes 1 `getContractEvents` call per chunk
+(down from 3, and always sequential); `TokenWatchlist`'s trade scan now
+makes 1 `getLogs` call per chunk (down from 2, and always sequential).
+Neither class ever runs more than one chunked scan concurrently against
+the RPC. See `test/viemMultiEventDispatch.test.ts` for direct proof this
+dispatch works against viem's own real decoding (not just this project's
+own mocks), and the "RPC resilience" describe blocks in
+`test/roundLedger.test.ts`/`test/tokenWatchlist.test.ts` for proof that a
+transient failure on one chunk retries only that chunk, never restarts
+the whole scan, and that exhausting retries fails clearly rather than
+looping forever.
+
 ## Required keeper balances
 
 Two separate ETH balances, on two separate chains, both funded manually
@@ -334,11 +364,40 @@ custom grammar.
 
 ## Retry/backoff
 
-Every RPC-touching step is wrapped in `withRetry` (`src/retry.ts`):
-up to 3 attempts, exponential backoff (500ms, 1s, 2s... capped at 8s) with
-jitter, but ONLY for transient, network-shaped failures (connection
-resets, timeouts, rate limits, 5xx) - a contract revert is the correct,
-final answer for that poll cycle and is never retried.
+Two distinct levels, both wrapped in the same `withRetry` primitive
+(`src/retry.ts`), both retrying ONLY transient, network-shaped failures
+(connection resets, timeouts, rate limits, 5xx) - a contract revert is
+the correct, final answer for that poll cycle and is never retried:
+
+- **Action level** (`index.ts`'s `runOnce` loop - closing rounds,
+  qualifying tokens, retrying/relaying randomness): 3 attempts, backoff
+  500ms/1s/2s, capped at 8s.
+- **Per-chunk level** (`TokenWatchlist`/`RoundLedger`'s own historical and
+  incremental log scans - see "Bounded block-range chunking" above): 5
+  attempts, backoff 1s/2s/4s/8s, capped at 15s - deliberately more
+  patient, since a startup historical scan happening BEFORE the action
+  loop's own retry wrapper even exists has no outer safety net at all if
+  a chunk's retries are exhausted too quickly; overridable per call via
+  an optional `retryOptions` argument (test-only in practice - production
+  code paths always use this conservative default).
+
+A late chunk's transient failure retries only that one chunk, with
+backoff, never restarts the whole scan from `deploymentBlock` - see
+`test/roundLedger.test.ts`/`test/tokenWatchlist.test.ts`'s own "RPC
+resilience" tests, which prove this directly against a fake client that
+fails a specific middle chunk before succeeding.
+
+**`KEEPER_RPC_PACING_MS`** (default 0): an optional pause between
+consecutive chunk requests within one scan, applied only when another
+chunk actually remains (never a trailing delay after the last one - see
+`blockRangeChunker.ts`'s own tests). This is optional RPC pressure
+relief, not the primary defense against a 429 - per-chunk retry above is
+what actually recovers from an occasional rate-limit response; this
+setting only matters for a provider that enforces a hard
+requests-per-second ceiling, where the requests themselves need spacing
+out rather than just retrying after the fact. Validated at startup: must
+be a non-negative integer if set at all, or the keeper refuses to start
+with a clear error - see `config.ts`'s `parseNonNegativeIntEnv`.
 
 ## Graceful shutdown
 

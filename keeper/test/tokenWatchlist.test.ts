@@ -23,7 +23,7 @@ describe("TokenWatchlist.scanForTradeActivity - address-less log queries (Part A
     }
   });
 
-  it("makes exactly 2 getLogs calls (Bought, Sold) whether 1 or 5,000 markets are known - request count never scales with market count", async () => {
+  it("makes exactly 1 getLogs call (Bought+Sold together, consolidated) whether 1 or 5,000 markets are known - request count never scales with market count", async () => {
     // chunkSizeBlocks explicitly large enough that the mock's fixed
     // getBlockNumber() (2000n) fits in a single chunk here - this test is
     // about call count not scaling with MARKET count, not about chunk-size
@@ -47,8 +47,8 @@ describe("TokenWatchlist.scanForTradeActivity - address-less log queries (Part A
     await bigWatchlist.scanForTradeActivity();
     const bigCallCount = (bigClients.robinhoodPublic.getLogs as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
 
-    expect(smallCallCount).toBe(2);
-    expect(bigCallCount).toBe(2);
+    expect(smallCallCount).toBe(1);
+    expect(bigCallCount).toBe(1);
     expect(bigCallCount).toBe(smallCallCount);
   });
 
@@ -139,5 +139,111 @@ describe("TokenWatchlist - chunked historical reconstruction (bounded block-rang
     // includes it (no active streak seeded for it here), but size
     // includes all three - the direct, positive check is that the
     // reconstruction didn't silently drop the earliest one.
+  });
+});
+
+describe("TokenWatchlist - RPC resilience: per-chunk 429/5xx retry (scanForTradeActivity)", () => {
+  const FAST_RETRY = { maxAttempts: 4, baseDelayMs: 1, maxDelayMs: 5 };
+  const MARKET_A = "0x2000000000000000000000000000000000000a" as `0x${string}`;
+  const MARKET_B = "0x2000000000000000000000000000000000000b" as `0x${string}`;
+
+  /** A fake trade-log stream spread across a wide block range, plus the
+   * ability to fail the first N calls for one specific chunk with a
+   * realistic 429-shaped error - the getLogs equivalent of roundLedger.
+   * test.ts's own makeFlakyChainClient, since TokenWatchlist's trade scan
+   * goes through client.getLogs({events: [...]}) rather than
+   * getContractEvents. */
+  function makeFlakyTradeClient(latestBlock: bigint, opts: { failChunkFrom: bigint; failChunkTo: bigint; failTimes: number }) {
+    const logs = [
+      { block: 300n, address: MARKET_A },
+      { block: 4_500n, address: MARKET_B }, // lands in the chunk that fails once
+      { block: 9_800n, address: MARKET_A },
+    ];
+    const callCountByChunk = new Map<string, number>();
+
+    return {
+      getBlockNumber: async () => latestBlock,
+      getContractEvents: async () => [],
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+        const key = `${fromBlock}-${toBlock}`;
+        const priorCalls = callCountByChunk.get(key) ?? 0;
+        callCountByChunk.set(key, priorCalls + 1);
+
+        if (fromBlock === opts.failChunkFrom && toBlock === opts.failChunkTo && priorCalls < opts.failTimes) {
+          throw new Error("HTTP request failed. Status: 429 Too Many Requests");
+        }
+
+        return logs.filter((l) => l.block >= fromBlock && l.block <= toBlock).map((l) => ({ address: l.address, args: {} }));
+      },
+      readContract: async () => 0n, // aboveThresholdSince re-read after a trade - value itself isn't the focus of these tests
+      callCountByChunk,
+    } as unknown as Parameters<typeof TokenWatchlist.withKnownTokens>[0] & { callCountByChunk: Map<string, number> };
+  }
+
+  it("REQUIREMENT (A): a middle chunk 429s once during trade-activity scanning, only that chunk is retried, and the resolved traded tokenIds are exactly correct", async () => {
+    const client = makeFlakyTradeClient(10_000n, { failChunkFrom: 4000n, failChunkTo: 4999n, failTimes: 1 });
+    const watchlist = TokenWatchlist.withKnownTokens(
+      client,
+      "0x1000000000000000000000000000000000000e" as `0x${string}`,
+      [
+        { tokenId: 1n, market: MARKET_A },
+        { tokenId: 2n, market: MARKET_B },
+      ],
+      1000n,
+      FAST_RETRY
+    );
+
+    const traded = await watchlist.scanForTradeActivity();
+
+    expect(client.callCountByChunk.get("4000-4999")).toBe(2); // one failure + one successful retry
+    for (const [key, count] of client.callCountByChunk) {
+      if (key === "4000-4999") continue;
+      expect(count).toBe(1); // every other chunk called exactly once - not rescanned
+    }
+    expect(traded.sort()).toEqual([1n, 2n]); // both markets' trades resolved correctly despite the mid-scan failure
+  });
+
+  it("REQUIREMENT (B): a chunk that 429s persistently during trade-activity scanning exhausts retries at maxAttempts and fails clearly", async () => {
+    const client = makeFlakyTradeClient(10_000n, { failChunkFrom: 4000n, failChunkTo: 4999n, failTimes: Infinity });
+    const watchlist = TokenWatchlist.withKnownTokens(
+      client,
+      "0x1000000000000000000000000000000000000e" as `0x${string}`,
+      [{ tokenId: 1n, market: MARKET_A }],
+      1000n,
+      FAST_RETRY
+    );
+
+    await expect(watchlist.scanForTradeActivity()).rejects.toThrow(/429/);
+    expect(client.callCountByChunk.get("4000-4999")).toBe(FAST_RETRY.maxAttempts);
+  });
+
+  it("REQUIREMENT: one Bought/Sold multi-event getLogs call per chunk, never two separate calls, confirmed directly from real call args (events array, no address filter)", async () => {
+    const client = makeFlakyTradeClient(10_000n, { failChunkFrom: 999_999n, failChunkTo: 999_999n, failTimes: 0 }); // never actually fails
+    const calls: unknown[] = [];
+    const originalGetLogs = client.getLogs;
+    client.getLogs = (async (args: unknown) => {
+      calls.push(args);
+      return originalGetLogs(args as never);
+    }) as typeof client.getLogs;
+
+    const watchlist = TokenWatchlist.withKnownTokens(
+      client,
+      "0x1000000000000000000000000000000000000e" as `0x${string}`,
+      [{ tokenId: 1n, market: MARKET_A }],
+      1_000_000n // single chunk, so exactly one call total
+    );
+    await watchlist.scanForTradeActivity();
+
+    expect(calls).toHaveLength(1);
+    const callArgs = calls[0] as { events?: unknown[]; event?: unknown; address?: unknown };
+    expect(Array.isArray(callArgs.events)).toBe(true);
+    expect(callArgs.events).toHaveLength(2); // Bought and Sold together
+    expect(callArgs.event).toBeUndefined(); // never the singular form
+    expect(callArgs.address).toBeUndefined(); // still no address filter, per the earlier address-less design
+  });
+
+  it("test-only overrides do not change the conservative production default when omitted: withKnownTokens' own retryOptions match the real default exactly", () => {
+    const watchlist = TokenWatchlist.withKnownTokens({} as unknown as Parameters<typeof TokenWatchlist.withKnownTokens>[0], "0x1000000000000000000000000000000000000e" as `0x${string}`, []);
+    expect(watchlist.retryOptionsForTesting).toEqual({ maxAttempts: 5, baseDelayMs: 1000, maxDelayMs: 15_000 });
   });
 });
