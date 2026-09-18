@@ -51,3 +51,29 @@ export function formatDate(iso: string) {
     year: "numeric",
   });
 }
+
+export function formatEthPrecise(
+  value: bigint | number | string,
+  opts: { maxDecimals?: number; sigDigits?: number } = {},
+): string {
+  const { maxDecimals = 18, sigDigits = 3 } = opts;
+  const n =
+    typeof value === "bigint" ? Number(value) / 1e18 : typeof value === "string" ? Number(value) : value;
+
+  if (!Number.isFinite(n)) return "—";
+  if (n === 0) return "0";
+  if (n >= 1) return n.toFixed(4).replace(/\.?0+$/, "");
+  if (n >= 0.0001) return n.toFixed(6).replace(/\.?0+$/, "");
+
+  // below 4dp: keep sigDigits significant figures so nonzero never reads as zero
+  const exp = Math.floor(Math.log10(Math.abs(n)));
+  const decimals = Math.min(maxDecimals, Math.max(0, sigDigits - 1 - exp));
+  const out = n.toFixed(decimals).replace(/\.?0+$/, "");
+  return out === "0" ? "<0.000001" : out;
+}
+
+/** True when a toFixed(4) render would lie about a nonzero amount. */
+export function isDustEth(value: bigint | number): boolean {
+  const n = typeof value === "bigint" ? Number(value) / 1e18 : value;
+  return n > 0 && n < 0.0001;
+}
