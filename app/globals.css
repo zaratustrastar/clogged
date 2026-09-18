@@ -47,3 +47,46 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* --- Appended from handoff/globals.machine.css (UI redesign step 2) --- */
+/* CLOG machine — append to app/globals.css.
+   Keyframes MUST be global: scoping them inside <style jsx> renames them and the
+   animate-* utilities silently do nothing (that is the StatsTicker bug, F2). */
+
+@keyframes clog-marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
+@keyframes clog-lamp    { 0%,100% { opacity:.5 } 50% { opacity:1 } }
+@keyframes clog-hover   { 0%,100% { transform: translate(-50%,0) } 50% { transform: translate(-50%,6px) } }
+@keyframes clog-sway    { 0%,100% { transform: rotate(-2deg) } 50% { transform: rotate(2deg) } }
+@keyframes clog-hum     { 0%,100% { transform: translate(0,0) } 50% { transform: translate(0,.6px) } }
+@keyframes clog-tear    { from { transform: translateY(-40%); opacity:.9 } to { transform: translateY(600%); opacity:0 } }
+@keyframes clog-shake   { 0%,100% { transform: translate(0,0) } 25% { transform: translate(-1.5px,1px) } 50% { transform: translate(1.5px,-1px) } 75% { transform: translate(-1px,-1px) } }
+@keyframes clog-impact  { 0% { transform: translate(0,0) } 15% { transform: translate(0,3px) } 40% { transform: translate(0,-2px) } 70% { transform: translate(0,1px) } 100% { transform: translate(0,0) } }
+@keyframes clog-flicker { 0%,100% { opacity:1 } 8% { opacity:.25 } 13% { opacity:1 } 21% { opacity:.45 } 27% { opacity:1 } }
+
+:root { color-scheme: dark; }
+
+body {
+  background: #050506;
+  color: #F2EFEA;
+  font-family: var(--font-body), Archivo, sans-serif;
+}
+
+/* every figure is tabular, everywhere */
+.clog-fig { font-family: var(--font-mono), "Space Mono", monospace; font-variant-numeric: tabular-nums; }
+
+/* focus is visible on dark chrome */
+:where(a, button, input, select, [tabindex]):focus-visible {
+  outline: 2px solid #FFC61A;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* one place, all motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
