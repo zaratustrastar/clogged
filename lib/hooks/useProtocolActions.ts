@@ -6,6 +6,7 @@ import {
   usePublicClient,
   useWriteContract,
   useWaitForTransactionReceipt,
+  useSimulateContract,
 } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { encodeAbiParameters, keccak256, decodeEventLog, BaseError, ContractFunctionRevertedError, type Address, type Log } from "viem";
@@ -596,3 +597,83 @@ export function useClaimReward() {
 // Re-export the receipt hook for components that want to render an explorer
 // link once a hash is known, without each one re-deriving the pattern.
 export { useWaitForTransactionReceipt };
+
+/** Real pre-trade quote via wagmi's useSimulateContract - an eth_call
+ * against BondingCurveClog's actual buy/sell function (there is no separate
+ * external quote function on the contract; see the implementation report).
+ * Not an approximation: this is the exact result the real transaction would
+ * produce if submitted right now.
+ *
+ * Extracted verbatim from components/token/TradeWidget.tsx (the UI redesign's
+ * new TradeDeck needs this same read and must not duplicate it - see
+ * useProtocolActions.ts's own module doc) - the logic itself is unchanged,
+ * only its location and export visibility.
+ *
+ * The sell simulation is only ever attempted once allowance is already
+ * sufficient - sell() itself calls token.transferFrom() internally, so
+ * simulating it against insufficient allowance would revert for a reason
+ * that has nothing to do with price. That revert must never be shown as
+ * "price moved" - it isn't attempted at all until the approval-gated sell
+ * button confirms allowance is enough. */
+export function useTradeQuote(
+  marketAddress: `0x${string}`,
+  side: "buy" | "sell",
+  ethAmount: number,
+  sellAmountWei: bigint | null,
+  sellAllowanceSufficient: boolean
+) {
+  const { address } = useAccount();
+
+  // Refreshed periodically rather than frozen at mount: a token page left
+  // open for a long time must never simulate against a deadline computed
+  // when the component first mounted, which could eventually be more than
+  // 10 minutes in the past. This is a read-only quote (never the actual
+  // transaction - see useBuyToken/useSellToken for that, which derive
+  // their own deadline fresh from the chain's latest block at submit
+  // time), so refreshing once a minute is more than sufficient headroom
+  // against the contract's 600-second window. No useMemo needed - this
+  // computation is trivially cheap, and re-running it on every render
+  // (whether triggered by the interval below or by the amount input
+  // changing) costs nothing extra.
+  const [, forceMinuteTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceMinuteTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+
+  const validBuy = ethAmount > 0 && Boolean(address);
+  const validSell = sellAmountWei !== null && sellAmountWei > 0n && Boolean(address) && sellAllowanceSufficient;
+
+  const buySim = useSimulateContract({
+    address: marketAddress,
+    abi: bondingCurveClogAbi,
+    functionName: "buy",
+    args: [0n, deadline],
+    value: validBuy ? BigInt(Math.round(ethAmount * 1e18)) : 0n,
+    account: address,
+    query: { enabled: validBuy && side === "buy" },
+  });
+
+  const sellSim = useSimulateContract({
+    address: marketAddress,
+    abi: bondingCurveClogAbi,
+    functionName: "sell",
+    args: [sellAmountWei ?? 0n, 0n, deadline],
+    account: address,
+    query: { enabled: validSell && side === "sell" },
+  });
+
+  if (side === "buy") {
+    return {
+      output: buySim.data ? Number(buySim.data.result) / 1e18 : null,
+      isLoading: buySim.isFetching,
+      error: buySim.error ? String(buySim.error.message ?? buySim.error) : null,
+    };
+  }
+  return {
+    output: sellSim.data ? Number(sellSim.data.result[0]) / 1e18 : null,
+    isLoading: sellSim.isFetching,
+    error: sellSim.error ? String(sellSim.error.message ?? sellSim.error) : null,
+  };
+}
