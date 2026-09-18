@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { ExploreTable, type ExploreRow } from "@/components/explore/ExploreTable";
@@ -34,7 +35,7 @@ function toExploreStatus(stage: EligibilityStage): "QUALIFIED" | "QUALIFYING" | 
   return "BUILDING";
 }
 
-export default function ExplorePage() {
+function ExploreContent() {
   const params = useSearchParams();
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("trending");
   const [query, setQuery] = useState(params.get("q") ?? "");
@@ -110,5 +111,20 @@ export default function ExplorePage() {
         <ExploreTable rows={rows} isLoading={discovery.isLoading} query={query} />
       )}
     </div>
+  );
+}
+
+// Next.js 14 requires any component calling useSearchParams() to be wrapped
+// in a Suspense boundary (confirmed directly: `next build` fails
+// prerendering this page outright without it - "useSearchParams() should be
+// wrapped in a suspense boundary"). The fallback below has no protocol data
+// of its own to show, so it renders the same honest, empty-content shell
+// the real page would show while discovery is still loading - never a
+// placeholder number.
+export default function ExplorePage() {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-[1240px] px-5 pb-24 pt-7" />}>
+      <ExploreContent />
+    </Suspense>
   );
 }
