@@ -74,3 +74,35 @@ export async function retryTransient<T>(
   }
   throw lastError;
 }
+
+/** Maps over `items` with at most `concurrency` calls to `fn` in flight at
+ * once, preserving input order in the returned array regardless of which
+ * call resolves first. Exists specifically so a per-item RPC read (e.g.
+ * RewardVault.previewClaim for every round a wallet could ever have won)
+ * never turns into `Promise.all(items.map(...))` - a call whose concurrency
+ * scales with total settled-round history rather than with anything
+ * bounded, and which the Robinhood public RPC has already demonstrated it
+ * rate-limits under real load (see this file's own scanBlockRangeInChunks
+ * docs for the identical class of problem on the log-scanning side). A
+ * single slow/failing item never blocks starting the next batch's other
+ * items - each item's own promise is independent - but never more than
+ * `concurrency` are in flight at any moment. */
+export async function mapWithConcurrencyLimit<T, R>(items: T[], concurrency: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  if (concurrency <= 0) {
+    throw new Error(`mapWithConcurrencyLimit: concurrency must be positive, got ${concurrency}`);
+  }
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}

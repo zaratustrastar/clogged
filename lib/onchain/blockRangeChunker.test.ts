@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { scanBlockRangeInChunks, retryTransient, isTransientRpcError } from "./blockRangeChunker";
+import { scanBlockRangeInChunks, retryTransient, isTransientRpcError, mapWithConcurrencyLimit } from "./blockRangeChunker";
 
 describe("scanBlockRangeInChunks", () => {
   it("a range smaller than the chunk size makes exactly one call", async () => {
@@ -117,5 +117,68 @@ describe("retryTransient", () => {
 
     await expect(retryTransient(fn, { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 })).rejects.toThrow(/429/);
     expect(fn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("mapWithConcurrencyLimit", () => {
+  it("never runs more than `concurrency` calls at once, even with many more items than the limit", async () => {
+    let inFlight = 0;
+    let maxObservedInFlight = 0;
+    const items = Array.from({ length: 23 }, (_, i) => i);
+
+    const results = await mapWithConcurrencyLimit(items, 5, async (item) => {
+      inFlight++;
+      maxObservedInFlight = Math.max(maxObservedInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return item * 2;
+    });
+
+    expect(maxObservedInFlight).toBeLessThanOrEqual(5);
+    expect(maxObservedInFlight).toBeGreaterThan(1); // proves it actually runs concurrently, not sequentially
+    expect(results).toEqual(items.map((i) => i * 2));
+  });
+
+  it("preserves input order in the returned array regardless of which item resolves first", async () => {
+    // Item 0 is deliberately the slowest, so a naive "push on completion"
+    // implementation would put it last - this proves index-based ordering.
+    const delays = [50, 5, 5, 5, 5];
+    const results = await mapWithConcurrencyLimit(delays, 3, async (delay, index) => {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return index;
+    });
+    expect(results).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("a concurrency limit larger than the item count still processes every item exactly once", async () => {
+    const items = [1, 2, 3];
+    const calls: number[] = [];
+    const results = await mapWithConcurrencyLimit(items, 100, async (item) => {
+      calls.push(item);
+      return item;
+    });
+    expect(calls.sort()).toEqual([1, 2, 3]);
+    expect(results).toEqual([1, 2, 3]);
+  });
+
+  it("an empty item list resolves to an empty array without calling fn at all", async () => {
+    const fn = vi.fn(async (x: number) => x);
+    const results = await mapWithConcurrencyLimit([], 5, fn);
+    expect(results).toEqual([]);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-positive concurrency rather than hanging or dividing by zero", async () => {
+    await expect(mapWithConcurrencyLimit([1, 2], 0, async (x) => x)).rejects.toThrow(/concurrency must be positive/);
+    await expect(mapWithConcurrencyLimit([1, 2], -3, async (x) => x)).rejects.toThrow(/concurrency must be positive/);
+  });
+
+  it("a single item's rejection propagates out (fails fast), rather than being swallowed", async () => {
+    await expect(
+      mapWithConcurrencyLimit([1, 2, 3], 2, async (item) => {
+        if (item === 2) throw new Error("boom");
+        return item;
+      })
+    ).rejects.toThrow(/boom/);
   });
 });
