@@ -78,7 +78,12 @@ export interface ClaimableReward {
   roundId: number;
   ticker: string;
   tokenId: number;
-  amountEth: number;
+  /** Exact wei value from RewardVault.previewClaim - carried through as a
+   * bigint from the contract read all the way to the UI, never round-
+   * tripped through a JS float (which cannot represent every wei value
+   * exactly and previously lost precision when converted back to a bigint
+   * for display). */
+  amountWei: bigint;
   windowClosesAt: string; // 90-day claim expiry
 }
 

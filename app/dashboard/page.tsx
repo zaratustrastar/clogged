@@ -36,15 +36,6 @@ import { formatEthPrecise } from "@/lib/format";
  *   - useClaimableRewards().error is a plain string (AsyncState's own shape),
  *       not the { message: string } object ClaimRow/HoldingsTray/TickerNftTray
  *       all want - wrapped at this page's edge, never inside those components.
- *   - ClaimableReward carries amountEth: number, not amountWei: bigint -
- *       useClaimableRewards() itself already converts wei to a float
- *       internally (Number(claimable) / 1e18 - confirmed directly against its
- *       own source). The bigint PrizeChute's own ClaimRow type wants is
- *       reconstructed via BigInt(Math.round(amountEth * 1e18)) - this cannot
- *       recover precision already lost inside the hook itself without
- *       modifying it, which is out of scope for a presentation-only redesign;
- *       flagged in the PR description as a known limitation, not silently
- *       glossed over.
  *   - No hook anywhere exposes a per-winner "share of the pot" percentage -
  *       ClaimRow.shareLabel and Holding.shareLabel both get "—", never a
  *       fabricated number.
@@ -53,6 +44,26 @@ import { formatEthPrecise } from "@/lib/format";
  *       rounds in one transaction, and building a client-side loop that
  *       fires multiple sequential wallet prompts is a new feature this task
  *       was not asked to invent; omitted rather than fabricated.
+ *
+ * ClaimableReward now carries amountWei: bigint (the exact previewClaim
+ * result, ported from useWalletData.ts's own fix) - passed straight through
+ * to PrizeChute's own ClaimRow.amountWei with no conversion at all. The
+ * amountEth: number round-trip (BigInt(Math.round(amountEth * 1e18))) that
+ * used to live on this line has been removed entirely: it went through a
+ * JS float and could lose wei precision on the way back to a bigint. There
+ * is no longer an intermediate float anywhere in this path.
+ *
+ * useClaimableRewards().refetch is now a real, root-aware async function
+ * (ported from useWalletData.ts's own fix): it awaits useRoundHistory's own
+ * refetch to completion first, and only then refetches the claimable query
+ * itself - which reads round-history's data directly from the query
+ * client's cache rather than a closure, so it is guaranteed to see the
+ * just-refreshed history, never a stale pre-retry snapshot. retryClaimable
+ * below calls this directly instead of manually invalidating the
+ * "clog-claimable" query key, which used to refetch claimable independently
+ * of round-history and could race exactly the way the fix's own commit
+ * message describes. heldTokens/tickerNfts have no such dependent-query
+ * relationship to race, so they keep the simple invalidateQueries approach.
  */
 
 export default function DashboardPage() {
@@ -62,17 +73,16 @@ export default function DashboardPage() {
   const claimable = useClaimableRewards();
   const claim = useClaimReward();
   const queryClient = useQueryClient();
-  // None of the three AsyncState-wrapped hooks above expose a refetch()
-  // method (confirmed directly against lib/hooks/useWalletData.ts - their
-  // own toAsyncState helper returns only {data, isLoading, error}). Retry
-  // uses the same react-query infrastructure those hooks are already built
-  // on instead, invalidating by the hooks' own real query-key prefixes
-  // (confirmed directly against their queryKey arrays) - this never
-  // modifies the hooks themselves, just asks the query cache they already
-  // participate in to refetch.
+  // heldTokens/tickerNfts are independent queries with no dependent-query
+  // race to worry about - manual invalidation by their own real query-key
+  // prefix (confirmed directly against their queryKey arrays) is still
+  // correct and simplest for them. claimable is different: its own
+  // queryFn depends on round-history's result, so its retry uses the
+  // hook's own root-aware refetch() instead (see this file's module doc
+  // comment above) - never a manual invalidateQueries for this one query.
   const retryHeldTokens = () => queryClient.invalidateQueries({ queryKey: ["clog-held-tokens"] });
   const retryTickerNfts = () => queryClient.invalidateQueries({ queryKey: ["clog-owned-ticker-nfts"] });
-  const retryClaimable = () => queryClient.invalidateQueries({ queryKey: ["clog-claimable"] });
+  const retryClaimable = () => claimable.refetch();
 
   // PATCH P0-1, applied at the page level since useClaimReward tracks only
   // one in-flight transaction globally, not per round: "claimed" is derived
@@ -123,7 +133,9 @@ export default function DashboardPage() {
     return {
       roundNumber: c.roundId,
       ticker: c.ticker,
-      amountWei: BigInt(Math.round(c.amountEth * 1e18)),
+      // Exact wei from useClaimableRewards - no float round-trip anywhere
+      // in this path (see this file's own module doc comment above).
+      amountWei: c.amountWei,
       shareLabel: "—",
       claimed: confirmedRoundIds.has(c.roundId),
       status: isThisRoundClaiming ? claim.status : "idle",
