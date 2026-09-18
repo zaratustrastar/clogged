@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ClaimableWinnings } from "@/components/dashboard/ClaimableWinnings";
+import { ClaimableWinningsError } from "@/components/dashboard/ClaimableWinningsError";
 import { HoldingsTable } from "@/components/dashboard/HoldingsTable";
 import { LaunchedTable } from "@/components/dashboard/LaunchedTable";
 import { TickerNFTList } from "@/components/dashboard/TickerNFTList";
@@ -65,6 +66,8 @@ export default function DashboardPage() {
 
       {claimable.isLoading ? (
         <Skeleton className="h-28 w-full" />
+      ) : claimable.error ? (
+        <ClaimableWinningsError onRetry={claimable.refetch} />
       ) : (
         claimable.data && <ClaimableWinnings rewards={claimable.data} />
       )}

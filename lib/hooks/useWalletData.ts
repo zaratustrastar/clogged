@@ -125,17 +125,37 @@ export function useOwnedTickerNFTs(): AsyncState<OwnedTickerNFT[]> {
 /** Claimable rewards: for every round that has ever settled (useRoundHistory,
  * from RoundManager's RoundSettled events), calls RewardVault.previewClaim
  * for the connected wallet - the real, authoritative view function, not an
- * invented calculation. A nonzero result means real, claimable ETH. */
-export function useClaimableRewards(): AsyncState<ClaimableReward[]> {
+ * invented calculation. A nonzero result means real, claimable ETH.
+ *
+ * If useRoundHistory itself failed (e.g. a non-transient RPC error that
+ * survived its own internal retries - see useRoundHistory.ts), that
+ * failure is explicitly re-thrown here rather than left to silently look
+ * like "round history is simply empty, so there's nothing to claim". The
+ * `enabled` gate below no longer requires roundHistory.data to be present -
+ * only that roundHistory has finished (successfully or not) - specifically
+ * so an upstream error reaches this query's own `error` field instead of
+ * leaving this query permanently disabled (and therefore reporting neither
+ * loading nor error, which is exactly what let a real RPC failure render as
+ * "no winnings" with no indication anything went wrong). */
+export function useClaimableRewards(): AsyncState<ClaimableReward[]> & { refetch: () => void } {
   const { address, isConnected } = useWalletAccount();
   const roundHistory = useRoundHistory();
   const discovery = useTokenDiscovery();
   const publicClient = usePublicClient();
 
   const q = useQuery({
-    queryKey: ["clog-claimable", address, roundHistory.data?.map((r) => r.roundId).join(",")],
-    enabled: isConnected && Boolean(address) && Boolean(roundHistory.data) && Boolean(publicClient) && Boolean(addresses.rewardVault),
+    queryKey: ["clog-claimable", address, roundHistory.data?.map((r) => r.roundId).join(","), roundHistory.isError],
+    enabled:
+      isConnected &&
+      Boolean(address) &&
+      Boolean(publicClient) &&
+      Boolean(addresses.rewardVault) &&
+      !roundHistory.isLoading,
+    retry: false,
     queryFn: async (): Promise<ClaimableReward[]> => {
+      if (roundHistory.isError) {
+        throw roundHistory.error instanceof Error ? roundHistory.error : new Error(String(roundHistory.error ?? "Failed to load round history"));
+      }
       if (!publicClient || !address || !roundHistory.data || !addresses.rewardVault) return [];
       const rewardVault = addresses.rewardVault;
 
@@ -177,7 +197,18 @@ export function useClaimableRewards(): AsyncState<ClaimableReward[]> {
     },
   });
 
-  return toAsyncState(q, isConnected);
+  return {
+    ...toAsyncState(q, isConnected),
+    // Retries the whole chain from its own root cause: re-running
+    // roundHistory's query (not just this one) is what actually matters
+    // when THIS query's own error originated upstream, from
+    // useRoundHistory's own RPC call - refetching only this query would
+    // just immediately re-throw the same still-cached upstream error.
+    refetch: () => {
+      roundHistory.refetch();
+      q.refetch();
+    },
+  };
 }
 
 export function useClaimHistory(): AsyncState<ClaimableReward[]> {

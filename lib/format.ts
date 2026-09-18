@@ -5,6 +5,24 @@ export function formatEth(value: number, opts: { decimals?: number } = {}) {
   return `${value.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "")} ETH`;
 }
 
+/** Like formatEth, but never collapses a real, nonzero value down to a
+ * "<0.0001 ETH" placeholder - shows enough decimal digits for at least 3
+ * significant figures instead. Use this wherever the exact amount matters
+ * to the person reading it (e.g. an amount they're about to claim) - a
+ * placeholder that hides the real number is the wrong tradeoff there, even
+ * though it's a reasonable one for a coarser display like a market-cap
+ * ticker (formatEth above). */
+export function formatEthPrecise(value: number): string {
+  if (value === 0) return "0 ETH";
+  const abs = Math.abs(value);
+  if (abs >= 0.0001) {
+    return `${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} ETH`;
+  }
+  const magnitude = Math.floor(Math.log10(abs));
+  const decimals = Math.min(18, Math.max(4, -magnitude + 2));
+  return `${value.toFixed(decimals)} ETH`;
+}
+
 export function formatCompact(value: number) {
   return new Intl.NumberFormat("en-US", {
     notation: "compact",
