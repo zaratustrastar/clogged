@@ -1,38 +1,114 @@
 "use client";
 
-import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { TokenTable } from "@/components/explore/TokenTable";
+import { useMemo, useState } from "react";
+import { ExploreTable, type ExploreRow } from "@/components/explore/ExploreTable";
+import { ErrorPlate } from "@/components/machine/States";
+import { useTokenDiscovery } from "@/lib/hooks/useTokenDiscovery";
+import { formatEthPrecise } from "@/lib/format";
+import type { EligibilityStage } from "@/lib/types";
 
-function ExploreContent() {
-  const params = useSearchParams();
-  const q = params.get("q") ?? "";
-  const tabParam = params.get("tab");
-  const initialTab = tabParam === "next-draw" || tabParam === "new" ? tabParam : "trending";
+const TABS = [
+  { id: "trending", label: "TRENDING", note: "SORTED BY MARKET CAP" },
+  { id: "next", label: "NEXT DRAW", note: "QUALIFIED + QUALIFYING ONLY" },
+  { id: "new", label: "NEW", note: "NEWEST FIRST" },
+] as const;
 
-  return (
-    <div className="content-container py-10">
-      <h1 className="font-display text-2xl font-semibold text-ink">Explore memes</h1>
-      <p className="mt-1 text-sm text-ink-dim">
-        {q ? (
-          <>
-            Showing results for <span className="text-ink">&ldquo;{q}&rdquo;</span>
-          </>
-        ) : (
-          "No need to launch — buy into any live meme and back it toward the draw."
-        )}
-      </p>
-      <div className="mt-6">
-        <TokenTable searchQuery={q} initialTab={initialTab} />
-      </div>
-    </div>
-  );
+/* Same reads as today. Changes are presentational + honesty:
+ *  - "Trending" states that it sorts by market cap instead of implying momentum (P2)
+ *  - the always-zero Volume column is gone until it is indexable (P2)
+ *  - rows are Links, keyboard reachable (P2/F3)
+ *  - a failed read renders an error plate, never an empty table
+ *
+ * Runbook §0: useTokenDiscovery's import path/name both match reality exactly.
+ * Its real return (a plain react-query result: {data: TokenSummary[] | undefined,
+ * isLoading, error, refetch}) is NOT the same shape as ExploreRow at all - the
+ * handoff's own `discovery.data as ExploreRow[]` cast would have compiled (an
+ * unsafe `as`) but rendered wrong/undefined fields for every row. Mapped for
+ * real below, at this page's edge - see toExploreStatus, matching the same
+ * 5-stage EligibilityStage -> 3-lamp collapse used on the landing page
+ * (app/page.tsx's toPrizeStatus), documented there. */
+function toExploreStatus(stage: EligibilityStage): "QUALIFIED" | "QUALIFYING" | "BUILDING" {
+  if (stage === "qualified") return "QUALIFIED";
+  if (stage === "qualifying" || stage === "ready") return "QUALIFYING";
+  return "BUILDING";
 }
 
 export default function ExplorePage() {
+  const params = useSearchParams();
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("trending");
+  const [query, setQuery] = useState(params.get("q") ?? "");
+
+  const discovery = useTokenDiscovery();
+
+  const rows: ExploreRow[] = useMemo(() => {
+    const all: ExploreRow[] = (discovery.data ?? []).map((t) => ({
+      ticker: `$${t.ticker}`,
+      name: t.name,
+      priceEth: formatEthPrecise(t.priceEth),
+      change1h: t.change1hPct,
+      change24h: t.change24hPct,
+      curvePct: t.curveProgressPct,
+      marketCapEth: formatEthPrecise(t.marketCapEth),
+      status: toExploreStatus(t.eligibility),
+    }));
+    const q = query.trim().toUpperCase();
+    let out = q
+      ? all.filter((r) => r.ticker.toUpperCase().includes(q) || r.name.toUpperCase().includes(q))
+      : all.slice();
+    if (tab === "next") out = out.filter((r) => r.status !== "BUILDING");
+    if (tab === "new") out.reverse();
+    return out;
+  }, [discovery.data, query, tab]);
+
+  const note = TABS.find((t) => t.id === tab)!.note;
+
   return (
-    <Suspense fallback={<div className="content-container py-10 text-sm text-ink-dim">Loading…</div>}>
-      <ExploreContent />
-    </Suspense>
+    <div className="mx-auto flex max-w-[1240px] flex-col gap-[18px] px-5 pb-24 pt-7">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="m-0 font-display text-[clamp(26px,3.6vw,38px)] tracking-[-0.025em]">
+            Everything in the machine
+          </h1>
+          <p className="mt-1.5 text-[14.5px] text-ink-400">
+            {discovery.data ? `${discovery.data.length} live tickers` : "Loading tickers"}
+          </p>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="search ticker or name"
+          aria-label="Search tickers"
+          className="min-w-0 flex-[0_1_280px] border border-edge-hair bg-chassis-800 px-3.5 py-3 text-[13px] text-ink-100 outline-none placeholder:text-ink-600"
+        />
+      </header>
+
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-edge-hair pb-0.5">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            aria-pressed={tab === t.id}
+            className={`border-0 bg-transparent px-3 py-2.5 font-mono text-meta ${
+              tab === t.id ? "border-b-2 border-amber text-amber" : "text-ink-500"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+        <div className="flex-1 basis-5" />
+        <span className="self-center font-mono text-label text-ink-600">{note}</span>
+      </div>
+
+      {discovery.error ? (
+        <ErrorPlate
+          title="Could not load tickers"
+          detail={discovery.error.message}
+          onRetry={() => discovery.refetch()}
+        />
+      ) : (
+        <ExploreTable rows={rows} isLoading={discovery.isLoading} query={query} />
+      )}
+    </div>
   );
 }
