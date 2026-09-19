@@ -81,6 +81,28 @@ describe("escapeXml", () => {
 });
 
 describe("generateTickerArtworkV2", () => {
+  // Real, measured safe-area bounds (see lib/tickerArtwork.ts's own docs on
+  // how these were scanned directly against the base image's real pixel
+  // content) - mirrored here so these tests assert against the same real
+  // numbers the generator itself uses, not independently-guessed values
+  // that could drift from the implementation without either side noticing.
+  const MAIN_TICKER_SAFE_WIDTH = 660;
+  const MAIN_TICKER_BASELINE_Y = 420;
+  const TOKEN_ID_PLAQUE_SAFE_WIDTH = 620;
+  const TOKEN_ID_PLAQUE_BASELINE_Y = 726;
+  // The plaque's own real measured vertical span (metal divider to bottom
+  // border) - the main ticker's own text element must never fall inside
+  // this range, and the token-id element must always fall inside it.
+  const PLAQUE_TOP_Y = 655;
+  const PLAQUE_BOTTOM_Y = 780;
+
+  function extractTextElement(svg: string, textContentPattern: string): { y: number; textLength: number } | null {
+    const re = new RegExp(`<text[^>]*\\by="([\\d.]+)"[^>]*textLength="([\\d.]+)"[^>]*>${textContentPattern}`);
+    const match = svg.match(re);
+    if (!match) return null;
+    return { y: Number(match[1]), textLength: Number(match[2]) };
+  }
+
   it("is a valid, well-formed SVG document, self-contained with an embedded base image and no external references", () => {
     const svg = generateTickerArtworkV2("DOG", 1);
     expect(svg).toContain("<svg");
@@ -111,34 +133,80 @@ describe("generateTickerArtworkV2", () => {
     expect(svg).toContain("TICKER #42");
   });
 
-  it("a 2-character ticker (the shortest valid length) fits within the plaque's safe text width", () => {
-    const svg = generateTickerArtworkV2("AB", 1);
-    expect(svg).toContain("$AB");
-    const textLength = Number(svg.match(/\$AB<\/text>/) ? svg.match(/textLength="([\d.]+)"[^>]*>\$AB/)?.[1] : NaN);
-    expect(textLength).toBeGreaterThan(0);
-    expect(textLength).toBeLessThanOrEqual(620); // PLAQUE_SAFE_WIDTH
+  describe("distinct coordinate regions - $TICKER in the central glass area, TICKER #<id> only in the lower plaque", () => {
+    it("the main $TICKER text element sits at the glass area's own baseline, well above the plaque's real top edge", () => {
+      const svg = generateTickerArtworkV2("DOG", 1);
+      const el = extractTextElement(svg, "\\$DOG");
+      expect(el, "main ticker text element must be found").not.toBeNull();
+      expect(el!.y).toBe(MAIN_TICKER_BASELINE_Y);
+      expect(el!.y).toBeLessThan(PLAQUE_TOP_Y);
+    });
+
+    it("the TICKER #<id> text element sits at the plaque's own baseline, within the plaque's real measured vertical span", () => {
+      const svg = generateTickerArtworkV2("DOG", 1);
+      const el = extractTextElement(svg, "TICKER #1");
+      expect(el, "token-id text element must be found").not.toBeNull();
+      expect(el!.y).toBe(TOKEN_ID_PLAQUE_BASELINE_Y);
+      expect(el!.y).toBeGreaterThan(PLAQUE_TOP_Y);
+      expect(el!.y).toBeLessThan(PLAQUE_BOTTOM_Y);
+    });
+
+    it("$TICKER never appears with a plaque-range y-coordinate, and TICKER #<id> never appears with the glass-area y-coordinate - the two zones never swap", () => {
+      const svg = generateTickerArtworkV2("DOG", 1);
+      const tickerEl = extractTextElement(svg, "\\$DOG")!;
+      const tokenEl = extractTextElement(svg, "TICKER #1")!;
+      expect(tickerEl.y).not.toBe(tokenEl.y);
+      expect(tokenEl.y).not.toBe(MAIN_TICKER_BASELINE_Y);
+      expect(tickerEl.y).not.toBe(TOKEN_ID_PLAQUE_BASELINE_Y);
+    });
+
+    it("the main ticker is visually dominant: its font-size is always strictly larger than the token-id line's fixed, small font-size", () => {
+      const svg = generateTickerArtworkV2("DOGE", 1);
+      const tickerFontSize = Number(svg.match(/font-size="([\d.]+)"[^>]*font-weight="900"/)?.[1]);
+      const tokenFontSize = Number(svg.match(/font-size="([\d.]+)"[^>]*font-weight="700"/)?.[1]);
+      expect(tickerFontSize).toBeGreaterThan(0);
+      expect(tokenFontSize).toBeGreaterThan(0);
+      expect(tickerFontSize).toBeGreaterThan(tokenFontSize * 2);
+    });
   });
 
-  it("a 10-character ticker (the longest valid length) fits within the plaque's safe text width", () => {
+  it("a 2-character ticker (the shortest valid length) fits within the main glass area's safe text width", () => {
+    const svg = generateTickerArtworkV2("AB", 1);
+    const el = extractTextElement(svg, "\\$AB");
+    expect(el, "must produce a matched, clamped text element").not.toBeNull();
+    expect(el!.textLength).toBeGreaterThan(0);
+    expect(el!.textLength).toBeLessThanOrEqual(MAIN_TICKER_SAFE_WIDTH);
+  });
+
+  it("a 10-character ticker (the longest valid length) fits, without wrapping or cropping, within the main glass area's safe text width", () => {
     const longTicker = "ABCDEFGHIJ";
     const svg = generateTickerArtworkV2(longTicker, 1);
     expect(svg).toContain(`$${longTicker}`);
-    const match = svg.match(/textLength="([\d.]+)"[^>]*>\$ABCDEFGHIJ/);
-    expect(match).not.toBeNull();
-    const textLength = Number(match![1]);
-    expect(textLength).toBeGreaterThan(0);
-    expect(textLength).toBeLessThanOrEqual(620); // never exceeds the plaque's own safe width
+    // No wrapping: exactly one <text> element carries the ticker, never split
+    // across a <tspan> or multiple elements.
+    expect(svg.match(/\$ABCDEFGHIJ/g)?.length).toBe(1);
+    const el = extractTextElement(svg, "\\$ABCDEFGHIJ");
+    expect(el, "must produce a matched, clamped text element").not.toBeNull();
+    expect(el!.textLength).toBeGreaterThan(0);
+    expect(el!.textLength).toBeLessThanOrEqual(MAIN_TICKER_SAFE_WIDTH); // never exceeds the glass area's own safe width - no cropping
   });
 
-  it("every valid ticker length (2 through 10) produces a textLength within the safe plaque width", () => {
+  it("every valid ticker length (2 through 10) produces a textLength within the main glass area's safe width, never wrapped", () => {
     for (let len = 2; len <= 10; len++) {
       const ticker = "X".repeat(len);
       const svg = generateTickerArtworkV2(ticker, 1);
-      const escapedTicker = `\\$${ticker}`;
-      const match = svg.match(new RegExp(`textLength="([\\d.]+)"[^>]*>${escapedTicker}`));
-      expect(match, `ticker length ${len} should produce a matched, clamped text element`).not.toBeNull();
-      expect(Number(match![1])).toBeLessThanOrEqual(620);
+      const el = extractTextElement(svg, `\\$${ticker}`);
+      expect(el, `ticker length ${len} should produce a matched, clamped text element`).not.toBeNull();
+      expect(el!.textLength).toBeLessThanOrEqual(MAIN_TICKER_SAFE_WIDTH);
+      expect(svg).not.toContain("<tspan"); // never wraps onto a second line
     }
+  });
+
+  it("the token-id plaque text stays within its own safe width even for a large tokenId", () => {
+    const svg = generateTickerArtworkV2("DOG", 999999);
+    const el = extractTextElement(svg, "TICKER #999999");
+    expect(el, "must produce a matched, clamped text element").not.toBeNull();
+    expect(el!.textLength).toBeLessThanOrEqual(TOKEN_ID_PLAQUE_SAFE_WIDTH);
   });
 
   it("the exact same ticker and tokenId always produce byte-identical artwork (no randomness, no current timestamp)", () => {

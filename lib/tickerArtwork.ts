@@ -137,24 +137,57 @@ function getV2BaseImageDataUri(): string {
 const V2_CANVAS_SIZE = 800;
 
 /** The base artwork's own intentionally empty plaque area - measured
- * directly against the approved base image's real pixel content (scanning
- * for the dark plaque bar's actual boundaries), not guessed. The plaque
- * itself spans roughly y=[655,780]; PLAQUE_SAFE_* below is deliberately
- * inset from those real edges so text never touches the plaque's own
- * beveled border or the corner bolts visible in the artwork. */
-const PLAQUE_SAFE_LEFT = 90;
-const PLAQUE_SAFE_RIGHT = 710;
-const PLAQUE_SAFE_WIDTH = PLAQUE_SAFE_RIGHT - PLAQUE_SAFE_LEFT; // 620
-const PLAQUE_CENTER_X = (PLAQUE_SAFE_LEFT + PLAQUE_SAFE_RIGHT) / 2; // 400
+ * directly against the approved base image's real pixel content, not
+ * guessed - each measured independently, since the intended composition
+ * has two visually and functionally distinct zones (per the approved
+ * mockup: a large, dominant $TICKER in the central glass display area,
+ * and only the smaller "TICKER #<id>" in the lower metal plaque below
+ * it - never both in the plaque, which an earlier revision of this file
+ * incorrectly did).
+ *
+ * MAIN_TICKER_SAFE_*: the large, mostly-empty glass interior above the
+ * plush toys - scanned vertically at the canvas's own center column
+ * (x=400) to find where the "CLOG" header bar and claw mechanism's own
+ * clutter ends (clean by y=250) and where the tallest toy silhouette
+ * begins (the main character's own head breaks the ambient glass
+ * gradient at y=532, the highest point of any toy across the full width -
+ * checked at 13 different x positions from x=100 to x=700, not just
+ * center, since the toys are not uniform height) - inset with margin on
+ * both ends. Horizontally, the glass interior is clean and uniform from
+ * roughly x=30 to x=765 at every y in this vertical range (checked via a
+ * full horizontal scan at y=400) - MAIN_TICKER_SAFE_LEFT/RIGHT are inset
+ * from those real edges the same way the plaque's own bounds are.
+ *
+ * TOKEN_ID_PLAQUE_SAFE_*: the lower metal plaque, spanning roughly
+ * y=[655,780] - unchanged from the original measurement, since the
+ * plaque's own real boundaries didn't move, only what's drawn inside
+ * them did. */
+const MAIN_TICKER_SAFE_LEFT = 70;
+const MAIN_TICKER_SAFE_RIGHT = 730;
+const MAIN_TICKER_SAFE_WIDTH = MAIN_TICKER_SAFE_RIGHT - MAIN_TICKER_SAFE_LEFT; // 660
+const MAIN_TICKER_CENTER_X = (MAIN_TICKER_SAFE_LEFT + MAIN_TICKER_SAFE_RIGHT) / 2; // 400
+// Vertically centered within the real clean-glass window y=[250,505] (see
+// the scan this comment references above) - baseline placed slightly
+// below the window's own geometric center, since baseline-anchored
+// all-caps text (no descenders) has its visual mass above the baseline,
+// not straddling it.
+const MAIN_TICKER_BASELINE_Y = 420;
 
-const TICKER_LINE_BASELINE_Y = 712;
-const TOKEN_LINE_BASELINE_Y = 756;
-const TOKEN_LINE_FONT_SIZE = 24;
+const TOKEN_ID_PLAQUE_SAFE_LEFT = 90;
+const TOKEN_ID_PLAQUE_SAFE_RIGHT = 710;
+const TOKEN_ID_PLAQUE_SAFE_WIDTH = TOKEN_ID_PLAQUE_SAFE_RIGHT - TOKEN_ID_PLAQUE_SAFE_LEFT; // 620
+const TOKEN_ID_PLAQUE_CENTER_X = (TOKEN_ID_PLAQUE_SAFE_LEFT + TOKEN_ID_PLAQUE_SAFE_RIGHT) / 2; // 400
+// The plaque's own real usable vertical span is y=[655,780] (125px tall).
+// A single line of "TICKER #<id>" text is centered within THAT span, not
+// the whole canvas - baseline = verticalMidpoint + a small optical
+// correction for the same above-baseline-mass reason as the main ticker.
+const TOKEN_ID_PLAQUE_BASELINE_Y = 726;
+const TOKEN_ID_PLAQUE_FONT_SIZE = 26;
 
-/** Same bold, condensed system-font stack for both overlay lines - no
- * externally referenced/loaded font file anywhere (the marketplace-safety
- * requirement this whole endpoint exists to satisfy): every one of these
- * names is either a real font already installed on essentially any
+/** Same bold, condensed system-font stack for both overlay text elements -
+ * no externally referenced/loaded font file anywhere (the marketplace-
+ * safety requirement this whole endpoint exists to satisfy): every one of
+ * these names is either a real font already installed on essentially any
  * rendering device, or a generic family the renderer substitutes
  * automatically - never a @font-face, @import, or <link>. Visually chosen
  * to match the base artwork's own "CLOG" wordmark, a bold, tall,
@@ -164,66 +197,72 @@ const OVERLAY_FONT_FAMILY = "'Arial Black', 'Arial Narrow', Impact, Arial, sans-
 /** Ticker length is 2-10 uppercase ASCII characters on-chain (TickerRegistry
  * enforces this at commit/reveal time - see MIN_TICKER_LENGTH/
  * MAX_TICKER_LENGTH), so "$" + ticker is 3-11 characters. Font size scales
- * down smoothly as the ticker gets longer, capped at a maximum that stays
- * visually proportionate to the plaque's own height (the plaque area is
- * ~125px tall, shared with the smaller "Ticker #N" line below it) - never
- * so large a short ticker looks oversized relative to the rest of the
- * artwork. The `textLength` attribute set alongside this (see
- * buildTickerLine below) is what actually GUARANTEES the rendered width
- * never exceeds the safe area regardless of the viewer's real font
- * metrics - this font-size formula only needs to get close, not be exact,
- * since textLength corrects for the gap between this estimate and
- * whatever the renderer's real glyph widths turn out to be. */
-function tickerLineFontSize(tickerWithDollar: string): number {
-  const maxFontSize = 68;
+ * down smoothly as the ticker gets longer, capped at a maximum chosen so a
+ * short ticker reads as the dominant visual element of the whole piece
+ * (per the approved mockup, where $TICKER is large and central) without
+ * looking cartoonishly oversized. The `textLength` attribute set alongside
+ * this (see buildMainTickerText below) is what actually GUARANTEES the
+ * rendered width never exceeds the safe area regardless of the viewer's
+ * real font metrics - this font-size formula only needs to get close, not
+ * be exact, since textLength corrects for the gap between this estimate
+ * and whatever the renderer's real glyph widths turn out to be. */
+function mainTickerFontSize(tickerWithDollar: string): number {
+  const maxFontSize = 190;
   // ~0.62x font-size per glyph is a reasonable average for a bold
   // condensed uppercase face - used only to pick a proportionate starting
   // size, not to guarantee the fit (textLength does that).
-  const estimatedFontSizeToFillWidth = PLAQUE_SAFE_WIDTH / (tickerWithDollar.length * 0.62);
+  const estimatedFontSizeToFillWidth = MAIN_TICKER_SAFE_WIDTH / (tickerWithDollar.length * 0.62);
   return Math.min(maxFontSize, estimatedFontSizeToFillWidth);
 }
 
-/** Renders the $TICKER line with a `textLength`/`lengthAdjust` clamp so the
- * ticker NEVER visually overflows the plaque's safe area, regardless of
+/** Renders the large, dominant $TICKER text in the central glass area, with
+ * a `textLength`/`lengthAdjust` clamp so the ticker NEVER visually
+ * overflows its safe area (never wraps, never gets cropped), regardless of
  * which font the actual viewer substitutes at render time (a marketplace
  * or wallet's own SVG renderer is never guaranteed to have the exact same
  * font metrics as any other) - this is what makes "ensure all valid ticker
  * lengths fit cleanly" a guarantee rather than a best-effort estimate. A
- * short ticker's own natural width at its chosen font-size is always under
- * the safe-area budget already, so clamping textLength to
+ * short ticker's own natural width at its chosen (large) font-size is
+ * always under the safe-area budget already, so clamping textLength to
  * min(safeWidth, naturalEstimatedWidth) never stretches a short ticker to
  * fill unused space - only ever compresses a longer one back down if it
  * would otherwise overflow. */
-function buildTickerLine(tickerWithDollar: string): string {
-  const fontSize = tickerLineFontSize(tickerWithDollar);
+function buildMainTickerText(tickerWithDollar: string): string {
+  const fontSize = mainTickerFontSize(tickerWithDollar);
   const naturalEstimatedWidth = tickerWithDollar.length * fontSize * 0.62;
-  const renderedWidth = Math.min(PLAQUE_SAFE_WIDTH, naturalEstimatedWidth);
-  return `<text x="${PLAQUE_CENTER_X}" y="${TICKER_LINE_BASELINE_Y}" text-anchor="middle" textLength="${renderedWidth.toFixed(1)}" lengthAdjust="spacingAndGlyphs" font-family="${OVERLAY_FONT_FAMILY}" font-size="${fontSize.toFixed(1)}" font-weight="900" letter-spacing="1" fill="#F2EFEA">${escapeXml(tickerWithDollar)}</text>`;
+  const renderedWidth = Math.min(MAIN_TICKER_SAFE_WIDTH, naturalEstimatedWidth);
+  return `<text x="${MAIN_TICKER_CENTER_X}" y="${MAIN_TICKER_BASELINE_Y}" text-anchor="middle" textLength="${renderedWidth.toFixed(1)}" lengthAdjust="spacingAndGlyphs" font-family="${OVERLAY_FONT_FAMILY}" font-size="${fontSize.toFixed(1)}" font-weight="900" letter-spacing="1" fill="#F2EFEA">${escapeXml(tickerWithDollar)}</text>`;
 }
 
-/** "Ticker #<tokenId>" - a fixed, smaller size regardless of ticker length
- * (a token id can only ever grow the collection's public cap's own digit
- * count, never the multi-hundred-pixel range a 2-vs-10-character ticker
- * spans), but still textLength-clamped for the same never-overflow
- * guarantee, since a token id near the top of a very large collection cap
- * could in principle still run long. */
-function buildTokenIdLine(tokenId: number): string {
+/** "TICKER #<tokenId>" - the ONLY thing drawn in the lower plaque (the main
+ * $TICKER moved to the central glass area above - see buildMainTickerText).
+ * A fixed font size regardless of ticker length (a token id can only ever
+ * grow the collection's public cap's own digit count, never the
+ * multi-hundred-pixel range a 2-vs-10-character ticker spans), but still
+ * textLength-clamped for the same never-overflow guarantee, since a token
+ * id near the top of a very large collection cap could in principle still
+ * run long. Centered both horizontally (text-anchor="middle" at the
+ * plaque's own center-x) and vertically (baseline chosen to center within
+ * the plaque's own real, measured vertical span, not the whole canvas). */
+function buildTokenIdPlaqueText(tokenId: number): string {
   const label = `TICKER #${tokenId}`;
-  const naturalEstimatedWidth = label.length * TOKEN_LINE_FONT_SIZE * 0.58;
-  const renderedWidth = Math.min(PLAQUE_SAFE_WIDTH, naturalEstimatedWidth);
-  return `<text x="${PLAQUE_CENTER_X}" y="${TOKEN_LINE_BASELINE_Y}" text-anchor="middle" textLength="${renderedWidth.toFixed(1)}" lengthAdjust="spacingAndGlyphs" font-family="${OVERLAY_FONT_FAMILY}" font-size="${TOKEN_LINE_FONT_SIZE}" font-weight="700" letter-spacing="3" fill="#9A9790">${escapeXml(label)}</text>`;
+  const naturalEstimatedWidth = label.length * TOKEN_ID_PLAQUE_FONT_SIZE * 0.58;
+  const renderedWidth = Math.min(TOKEN_ID_PLAQUE_SAFE_WIDTH, naturalEstimatedWidth);
+  return `<text x="${TOKEN_ID_PLAQUE_CENTER_X}" y="${TOKEN_ID_PLAQUE_BASELINE_Y}" text-anchor="middle" textLength="${renderedWidth.toFixed(1)}" lengthAdjust="spacingAndGlyphs" font-family="${OVERLAY_FONT_FAMILY}" font-size="${TOKEN_ID_PLAQUE_FONT_SIZE}" font-weight="700" letter-spacing="3" fill="#9A9790">${escapeXml(label)}</text>`;
 }
 
 /** Generates V2 TickerNFT artwork: the approved claw-machine base image,
  * embedded directly as a data URI (no externally loaded nested image - the
  * whole response is one self-contained SVG document), with the ticker's
- * own identity overlaid as deterministic SVG text into the base artwork's
- * intentionally empty plaque area. Same (ticker, tokenId) always produces
- * byte-identical output - no randomness, no current timestamp, nothing
- * non-deterministic anywhere in this function (unlike V1, V2 doesn't even
- * vary its background per-token - the whole point of V2 is that every
- * token in the collection shares the identical approved base image,
- * distinguished only by its own plaque text).
+ * own identity overlaid as deterministic SVG text across two distinct
+ * zones matching the approved mockup - a large, dominant $TICKER in the
+ * central glass display area, and only "TICKER #<id>" in the lower metal
+ * plaque below it. Same (ticker, tokenId) always produces byte-identical
+ * output - no randomness, no current timestamp, nothing non-deterministic
+ * anywhere in this function (unlike V1, V2 doesn't even vary its
+ * background per-token - the whole point of V2 is that every token in the
+ * collection shares the identical approved base image, distinguished only
+ * by its own overlaid text).
  */
 export function generateTickerArtworkV2(ticker: string, tokenId: number): string {
   const tickerWithDollar = `$${ticker}`;
@@ -231,8 +270,8 @@ export function generateTickerArtworkV2(ticker: string, tokenId: number): string
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${V2_CANVAS_SIZE}" height="${V2_CANVAS_SIZE}" viewBox="0 0 ${V2_CANVAS_SIZE} ${V2_CANVAS_SIZE}">
   <image x="0" y="0" width="${V2_CANVAS_SIZE}" height="${V2_CANVAS_SIZE}" href="${baseImageDataUri}"/>
-  ${buildTickerLine(tickerWithDollar)}
-  ${buildTokenIdLine(tokenId)}
+  ${buildMainTickerText(tickerWithDollar)}
+  ${buildTokenIdPlaqueText(tokenId)}
 </svg>`;
 }
 
