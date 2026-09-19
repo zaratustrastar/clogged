@@ -126,7 +126,10 @@ contract DeployRobinhoodChain is Script {
         // copy-paste leftover from an unrelated project - which is now permanently baked into
         // that already-live contract's own name() and cannot be fixed without deploying an
         // entirely new TickerNFT and re-wiring every existing minted ticker NFT to it.)
-        d.tickerNFT = new TickerNFT("CLOG Ticker Labels", "TICKER", msg.sender, tickerNFTBaseURI);
+        // `multisig` here is also the ERC-2981 secondary-sale royalty receiver (5%, see
+        // TickerNFT.sol's own ROYALTY_BPS) - set once via _setDefaultRoyalty inside the
+        // constructor, with no external setter anywhere in the contract to change it afterward.
+        d.tickerNFT = new TickerNFT("CLOG Ticker Labels", "TICKER", msg.sender, tickerNFTBaseURI, multisig);
         d.tickerRegistry = new TickerRegistry(
             address(d.engine),
             address(d.tickerNFT),
@@ -171,6 +174,15 @@ contract DeployRobinhoodChain is Script {
         // initialization privilege the `deployer` slot granted can never be exercised again by
         // anyone, now that it's non-zero -- confirmed structurally, not just by this read.
         require(d.tickerNFT.tickerRegistry() != address(0), "TickerNFT registry must be locked in by now");
+        // ERC-2981 secondary-sale royalty: 5% to multisig, set once in the constructor with no
+        // external setter anywhere in the contract - verified against a real royaltyInfo() call
+        // (tokenId is irrelevant here since no token-specific override is ever set, only the
+        // constructor's default applies) rather than merely trusting the constructor ran.
+        {
+            (address royaltyReceiver, uint256 royaltyAmount) = d.tickerNFT.royaltyInfo(0, 1 ether);
+            require(royaltyReceiver == d.tickerRegistry.multisig(), "TickerNFT royalty receiver must be multisig");
+            require(royaltyAmount == 0.05 ether, "TickerNFT royalty must be exactly 5% of sale price");
+        }
 
         // -- Governance --
         require(d.roundManager.governance() == address(d.timelock), "RoundManager governance not timelock");

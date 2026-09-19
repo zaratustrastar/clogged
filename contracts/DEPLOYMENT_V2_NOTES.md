@@ -6,7 +6,7 @@ carelessly. No transaction has been sent from this work; nothing here has been e
 
 ## Why nearly every contract needs a fresh address, not just the four that changed
 
-Four contracts have real source changes:
+Five contracts have real source changes:
 
 - `MemeToken.sol` — new `marketInitializedAt` field + `totalSupplyTwab()` (the P0 fix).
 - `RewardVault.sol` — `CLAIM_WINDOW` 90→5 days; `_circulatingTwab` now calls
@@ -15,9 +15,11 @@ Four contracts have real source changes:
 - `BondingCurveClog.sol` — tax bps constants (60/60/4000/1000/5000).
 - `TickerRegistry.sol` — `MULTISIG_LAUNCH_BPS` (10000); `_routeLaunchPayment` skips the
   now-zero WinnerPot call.
+- `TickerNFT.sol` — now inherits `ERC2981`; a new `multisig_` constructor argument sets a
+  fixed 5% secondary-sale royalty (see its own section below).
 
 None of these are upgradeable, so each needs a brand-new on-chain instance. That alone
-would only force those four addresses to change. The actual blast radius is much larger,
+would only force those five addresses to change. The actual blast radius is much larger,
 for a reason worth stating plainly: **this codebase resolves every circular deployment
 dependency with a one-time setter** (`setRoundManager`, `setRewardVault`, `setRegistry`,
 `setWrapper`), and every one of those setters can only fire once, ever, by design. A
@@ -35,8 +37,9 @@ Concretely:
   burned their own one-time `setRoundManager` call on the old `RoundManager`. **Both must
   be redeployed too**, again with unchanged source.
 - `TickerRegistry`'s constructor takes `tickerNFT`. The live `TickerNFT` already burned its
-  one-time `setRegistry` call on the old `TickerRegistry`. **`TickerNFT` must be redeployed
-  too**, unchanged source and all.
+  one-time `setRegistry` call on the old `TickerRegistry` - forcing a redeploy even if its
+  source were unchanged. Its source is no longer unchanged either, as of the ERC-2981
+  royalty addition below - real source change AND a forced redeploy, for the same address.
 - `TickerRegistry.sol` also directly embeds `new MemeToken(...)` and
   `new BondingCurveClog(...)` — Solidity bakes a contract's creation bytecode into whatever
   contract calls `new` on it. Since `MemeToken.sol` and `BondingCurveClog.sol` both changed,
@@ -70,8 +73,10 @@ unchanged from v1 — only every instance is new.
 5. `engine.setRoundManager(4)` and `randomnessProvider.setRoundManager(4)` — one-time
    setters, called once each, on the *new* #2/#3 instances only.
 6. `RewardVault(roundManager=4)` — new instance (real source change).
-7. `TickerNFT(name, symbol, deployer, baseURI)` — new instance (forced by #8's setter
-   being burned on the old one).
+7. `TickerNFT(name, symbol, deployer, baseURI, multisig)` — new instance (forced by #8's
+   setter being burned on the old one; also now carries the ERC-2981 royalty receiver -
+   see the royalty section below - as its own constructor argument, fixed for the life of
+   the contract).
 8. `TickerRegistry(engine=2, tickerNFT=7, multisig, winnerPot=6, governance, seed params)`
    — new instance (real source change, plus the embedded MemeToken/BondingCurveClog
    creation-code change).
@@ -96,6 +101,36 @@ Step order matters: 2/3 before 4 (constructor args), 4 before 5 and before 6 (co
 arg), 5 before anything that depends on RoundManager knowing engine/provider are live, 7
 before 8 (constructor arg), 8 before 9. Steps 2+3, and 7, have no dependency on each other
 and could be parallelized if convenient, but there is no reason to.
+
+## TickerNFT secondary-sale royalty (ERC-2981)
+
+Every new v2 `TickerNFT` advertises a 5% secondary-sale royalty (`ROYALTY_BPS = 500` of
+ERC-2981's default 10,000 denominator), paid entirely to the protocol multisig, set once in
+the constructor via `_setDefaultRoyalty` and never changeable afterward - no external
+setter exists anywhere in the contract, by design. This is set once per deployment, the
+same way `deployer`/`baseURI` already are - there is nothing further to configure or wire
+post-deployment; `_setDefaultRoyalty` runs inside the constructor itself, in the same
+transaction as deployment.
+
+This is a completely separate revenue stream from the 0.002 ETH ticker launch fee
+(`TickerRegistry`), the 0.6% meme-token trading tax, and the ticker owner's 40% share of
+that tax (`BondingCurveClog`) - none of those change because of this, and this royalty
+neither reduces nor replaces any of them.
+
+**Signaling only, not enforcement** - stated here as plainly as in the contract's own doc
+comment, since it is the one property of this feature most likely to be silently
+misunderstood by an operator or a future contributor: ERC-2981's `royaltyInfo` tells a
+marketplace what royalty *should* be paid and to whom. It cannot, and structurally does
+not, force any marketplace, OTC transfer, or a plain `transferFrom` call to actually pay
+it. A marketplace that does not honor ERC-2981, or a direct wallet-to-wallet transfer
+outside any marketplace, moves the NFT with zero royalty enforced by this contract or the
+chain itself. No transfer restriction, marketplace allowlist, or custom in-protocol
+marketplace was added to work around that limitation - see `TickerNFT.sol`'s own doc
+comment for the same reasoning stated in the contract itself.
+
+No deployment-script action beyond passing `multisig` as the new constructor argument (see
+step 7 above) is required for this feature - there is no separate registration step with
+any marketplace, and none would be effective even if attempted, per the limitation above.
 
 ## Frontend manifest / address files that must change
 

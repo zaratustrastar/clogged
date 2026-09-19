@@ -33,7 +33,7 @@ contract TickerRegistryTest is Test {
         engine = new EligibilityRegistry(address(this));
         engine.setRoundManager(address(0xD00D));
 
-        nft = new TickerNFT("Ticker", "TICK", address(this), "https://example.com/metadata/");
+        nft = new TickerNFT("Ticker", "TICK", address(this), "https://example.com/metadata/", multisig);
         registry = new TickerRegistry(
             address(engine), address(nft), multisig, winnerPot, governance, virtualEthSeed, BUFFER_BPS
         );
