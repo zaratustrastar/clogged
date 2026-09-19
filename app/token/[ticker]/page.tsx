@@ -94,7 +94,7 @@ function toActivityEvent(e: NonNullable<ReturnType<typeof useTokenDetail>["data"
   const detail =
     e.type === "buy" || e.type === "sell"
       ? e.amountEth !== null
-        ? formatEthPrecise(e.amountEth)
+        ? `${formatEthPrecise(e.amountEth)} ETH`
         : e.amountTokens !== null
           ? `${e.amountTokens.toLocaleString()} tokens`
           : "—"
@@ -231,10 +231,10 @@ export default function TokenPage({ params }: { params: { ticker: string } }) {
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(300px,340px)]">
         <div className="flex min-w-0 flex-col gap-3.5">
           <MarketPanel
-            priceEth={formatEthPrecise(t.priceEth)}
+            priceEth={`${formatEthPrecise(t.priceEth)} ETH`}
             change1h={t.change1hPct === null ? "—" : formatPct(t.change1hPct)}
             change24h={t.change24hPct === null ? "—" : formatPct(t.change24hPct)}
-            marketCapEth={formatEthPrecise(t.marketCapEth)}
+            marketCapEth={`${formatEthPrecise(t.marketCapEth)} ETH`}
             holders="—"
             curvePct={t.curveProgressPct}
             reserveLabel={`${t.realReserveEth.toFixed(3)} / ${MIN_RESERVE_THRESHOLD_ETH} ETH`}
@@ -253,8 +253,29 @@ export default function TokenPage({ params }: { params: { ticker: string } }) {
             amount={amount}
             onAmount={setAmount}
             balanceLabel="—"
-            quoteOut={quote.output !== null ? formatEthPrecise(quote.output) : null}
-            quoteMin={quote.output !== null ? formatEthPrecise(quote.output * 0.99) : null}
+            // quote.output's own unit depends on side: buying returns a
+            // token count (this ticker's own token), selling returns ETH -
+            // confirmed directly against useTradeQuote's real implementation
+            // (buySim decodes BondingCurveClog.buy's tokensOut; sellSim
+            // decodes sell's ethOut). formatEthPrecise's sig-fig-based
+            // rounding is tuned for small ETH amounts, not a token count in
+            // the thousands/millions, so the buy side uses toLocaleString
+            // instead - and the unit label matches which one is actually
+            // being shown, never a blanket "ETH" regardless of side.
+            quoteOut={
+              quote.output !== null
+                ? side === "sell"
+                  ? `${formatEthPrecise(quote.output)} ETH`
+                  : `${quote.output.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${ticker}`
+                : null
+            }
+            quoteMin={
+              quote.output !== null
+                ? side === "sell"
+                  ? `${formatEthPrecise(quote.output * 0.99)} ETH`
+                  : `${(quote.output * 0.99).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${ticker}`
+                : null
+            }
             needsApproval={side === "sell" && needsApproval}
             status={activeAction.status}
             hash={activeAction.txHash}
@@ -266,7 +287,7 @@ export default function TokenPage({ params }: { params: { ticker: string } }) {
           <DrawPanel
             ticker={ticker}
             roundNumber={roundStatus.data?.roundId ?? null}
-            jackpotEth={unallocatedPool !== undefined ? formatEthPrecise(unallocatedPool) : null}
+            jackpotEth={unallocatedPool !== undefined ? `${formatEthPrecise(unallocatedPool)} ETH` : null}
             countdown={roundStatus.data ? formatCountdown(roundStatus.data.closesAt, now) : null}
             state={qualificationState}
             status={qualify.status}

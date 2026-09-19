@@ -82,11 +82,11 @@ export default function RoundPage() {
     phase: settledDraw?.winningTicker ? "settled" : hasClosed ? "randomness-pending" : "open",
     roundNumber: r.roundId,
     countdown: hasClosed ? null : formatCountdown(r.closesAt, now),
-    jackpotEth: unallocatedPool !== undefined ? formatEthPrecise(unallocatedPool) : "—",
+    jackpotEth: unallocatedPool !== undefined ? `${formatEthPrecise(unallocatedPool)} ETH` : "—",
     qualifiedCount: r.candidateCount,
     candidates: (discovery.data ?? []).filter((t) => t.eligibility === "qualified").map((t) => ({ ticker: t.ticker })),
     winner: settledDraw?.winningTicker
-      ? { ticker: settledDraw.winningTicker, holders: "—", potEth: settledDraw.jackpotEth !== null ? formatEthPrecise(settledDraw.jackpotEth) : "—" }
+      ? { ticker: settledDraw.winningTicker, holders: "—", potEth: settledDraw.jackpotEth !== null ? `${formatEthPrecise(settledDraw.jackpotEth)} ETH` : "—" }
       : null,
     vrf: null,
   };
@@ -96,7 +96,7 @@ export default function RoundPage() {
     .map((d) => ({
       roundNumber: d.roundId,
       ticker: d.winningTicker as string,
-      potEth: d.jackpotEth !== null ? formatEthPrecise(d.jackpotEth) : "—",
+      potEth: d.jackpotEth !== null ? `${formatEthPrecise(d.jackpotEth)} ETH` : "—",
       holders: "—",
       vrfUrl: null,
     }));

@@ -120,7 +120,13 @@ contract DeployRobinhoodChain is Script {
         // TickerNFT/TickerRegistry circular dependency, same one-time-setter pattern used
         // throughout: deploy TickerNFT first (deployer authorized to initialize it once), deploy
         // TickerRegistry second (real TickerNFT address, no prediction needed), then lock it in.
-        d.tickerNFT = new TickerNFT("PMFI Casino Tickers", "TICKER", msg.sender, tickerNFTBaseURI);
+        // The name/symbol below are the ERC-721's own immutable constructor args - they can
+        // never be changed after deployment, so get them right before running this script for
+        // real. (An earlier deployment of this contract used "PMFI Casino Tickers" here - a
+        // copy-paste leftover from an unrelated project - which is now permanently baked into
+        // that already-live contract's own name() and cannot be fixed without deploying an
+        // entirely new TickerNFT and re-wiring every existing minted ticker NFT to it.)
+        d.tickerNFT = new TickerNFT("CLOG Ticker Labels", "TICKER", msg.sender, tickerNFTBaseURI);
         d.tickerRegistry = new TickerRegistry(
             address(d.engine),
             address(d.tickerNFT),
