@@ -5,7 +5,7 @@ import { Web3Provider } from "@/lib/web3/Web3Provider"; // real path - handoff a
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CLOG — misfits belong here",
+  title: "CLOG",
   description: "Launch a ticker, qualify it, and let the claw pick. Verifiably random draws onchain.",
 };
 

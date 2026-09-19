@@ -58,7 +58,7 @@ export default function LandingPage() {
   const round: HeroRound = {
     roundNumber: roundStatus.data?.roundId ?? null,
     countdown: roundStatus.data ? formatCountdown(roundStatus.data.closesAt, now) : null,
-    jackpotEth: unallocatedPool !== undefined ? formatEthPrecise(unallocatedPool) : null,
+    jackpotEth: unallocatedPool !== undefined ? `${formatEthPrecise(unallocatedPool)} ETH` : null,
     qualifiedCount: discovery.data ? qualifiedCount : null,
     // No hook currently exposes "randomness requested but not yet settled"
     // on the landing page's own data (RoundStatus has no such field, and
@@ -79,7 +79,7 @@ export default function LandingPage() {
     .map((t) => ({
       ticker: t.ticker,
       name: t.name,
-      priceEth: formatEthPrecise(t.priceEth),
+      priceEth: `${formatEthPrecise(t.priceEth)} ETH`,
       change24h: t.change24hPct,
       curvePct: t.curveProgressPct,
       status: toPrizeStatus(t.eligibility),

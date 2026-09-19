@@ -148,7 +148,7 @@ export default function DashboardPage() {
   const holdings: Holding[] = (heldTokens.data ?? []).map((h) => ({
     ticker: h.token.ticker,
     balanceLabel: h.balanceTokens.toLocaleString(undefined, { maximumFractionDigits: 2 }),
-    valueEthLabel: formatEthPrecise(h.balanceTokens * h.token.priceEth),
+    valueEthLabel: `${formatEthPrecise(h.balanceTokens * h.token.priceEth)} ETH`,
     shareLabel: "—",
     qualified: h.token.eligibility === "qualified",
   }));

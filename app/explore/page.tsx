@@ -46,11 +46,11 @@ function ExploreContent() {
     const all: ExploreRow[] = (discovery.data ?? []).map((t) => ({
       ticker: `$${t.ticker}`,
       name: t.name,
-      priceEth: formatEthPrecise(t.priceEth),
+      priceEth: `${formatEthPrecise(t.priceEth)} ETH`,
       change1h: t.change1hPct,
       change24h: t.change24hPct,
       curvePct: t.curveProgressPct,
-      marketCapEth: formatEthPrecise(t.marketCapEth),
+      marketCapEth: `${formatEthPrecise(t.marketCapEth)} ETH`,
       status: toExploreStatus(t.eligibility),
     }));
     const q = query.trim().toUpperCase();
