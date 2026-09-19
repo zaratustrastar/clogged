@@ -132,6 +132,27 @@ No deployment-script action beyond passing `multisig` as the new constructor arg
 step 7 above) is required for this feature - there is no separate registration step with
 any marketplace, and none would be effective even if attempted, per the limitation above.
 
+## TickerNFT artwork and base URI (V2 claw-machine artwork)
+
+The new V2 `TickerNFT` should be constructed with `tickerNFTBaseURI` pointing at the
+deployment-scoped metadata route, `https://clog.run/api/ticker-metadata/v2/` (matching the
+`"v2"` deploymentId wired into `lib/web3/deployments.ts`'s `KNOWN_DEPLOYMENTS` table) -
+never the legacy, unscoped `https://clog.run/api/ticker-metadata/` path, and never
+`canary-v1`'s own base URI. This is the same one-time, immutable constructor argument
+`TickerNFT.sol` has always taken (`baseURI_`) - no code change was needed in the contract
+itself for this, only the value passed to it at deploy time.
+
+Artwork itself is versioned in `lib/tickerArtwork.ts`: `generateTickerArtworkV1` (renamed,
+byte-for-byte the same logic every already-minted HOOD/canary-v1 NFT's metadata depends on
+- never changed) and a new `generateTickerArtworkV2` (the approved claw-machine base image,
+embedded as a self-contained data URI, with `$TICKER`/`TICKER #<id>` overlaid as
+deterministic SVG text into the base artwork's own intentionally empty plaque area). Both
+`app/api/ticker-image/[...slug]/route.ts` and `app/api/ticker-metadata/[...slug]/route.ts`
+dispatch by `deploymentId` (`slug[0] === "v2"`), not by chain/registry value - the same
+`"v2"` id that appears in `TickerNFT.baseURI` is what selects V2 artwork, keeping the two
+concerns (which contract does a token's data come from, which artwork does it render with)
+tied to the same one identifier rather than two independently-drifting configurations.
+
 ## Frontend manifest / address files that must change
 
 - `deployments/robinhood-mainnet.json` — every one of the 5 frontend-facing addresses

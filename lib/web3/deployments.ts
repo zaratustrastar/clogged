@@ -31,6 +31,31 @@ export const LEGACY_HOOD_DEPLOYMENT: DeploymentIdentity = {
 };
 
 /**
+ * The canary deployment, frozen to its own real, already-deployed chain +
+ * TickerRegistry - a fixed constant, deliberately NEVER derived from
+ * env.chainId/env.tickerRegistry (which is what getActiveDeployment() reads
+ * and which changes the moment the app's active manifest is switched to
+ * point at V2 or any future deployment).
+ *
+ * This was previously resolved dynamically via getActiveDeployment() - safe
+ * only for as long as the canary WAS the active deployment, and silently
+ * wrong the instant it stopped being one: the canary TickerNFT's own
+ * immutable base URI (https://clog.run/api/ticker-metadata/canary-v1/) is
+ * permanent, on-chain, and can never be changed, so "canary-v1" must
+ * permanently resolve to the canary's own real chain/registry regardless of
+ * whatever the app is actively configured to point at later. Values below
+ * are the canary's actual, already-deployed, already-verified identity -
+ * read directly from deployments/robinhood-mainnet.json at the time V2 work
+ * began (chainId 4663, tickerRegistry
+ * 0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2 - the same address documented
+ * throughout this repo's own deployment records), not guessed or derived.
+ */
+export const FROZEN_CANARY_V1_DEPLOYMENT: DeploymentIdentity = {
+  chainId: 4663,
+  tickerRegistryAddress: "0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2",
+};
+
+/**
  * Fixed, server-side mapping from a short, URL-safe deploymentId to its
  * real deployment identity. This is the ONLY way a deploymentId in a URL
  * path (e.g. /api/ticker-metadata/canary-v1/1) ever resolves to a real
@@ -42,20 +67,26 @@ export const LEGACY_HOOD_DEPLOYMENT: DeploymentIdentity = {
  * live base URI, for the same reason LEGACY_HOOD_DEPLOYMENT itself is
  * never repurposed.
  *
- * "canary-v1" is deliberately NOT a second hardcoded address here - it
- * derives from env.chainId/env.tickerRegistry, which themselves come
- * directly from the tracked deployment manifest
- * (deployments/robinhood-mainnet.json, imported once in env.ts - see that
- * file's own docs). The deployed canary TickerNFT's own immutable base URI
- * is https://clog.run/api/ticker-metadata/canary-v1/, which this app's
- * active deployment (the manifest) IS the canary - so "canary-v1" and "the
- * active deployment" are, correctly, the exact same underlying value,
- * read once, never duplicated. This is what makes drift between the two
- * structurally impossible rather than merely unlikely: there is only ever
- * one place (the manifest) either value could come from.
+ * "canary-v1" resolves to FROZEN_CANARY_V1_DEPLOYMENT above - a fixed
+ * constant, not the active deployment - so it keeps resolving to the real
+ * canary contracts forever, including after "v2" becomes the app's active
+ * deployment (see FROZEN_CANARY_V1_DEPLOYMENT's own docs for why this
+ * matters and what used to be wrong here).
+ *
+ * "v2" is deliberately NOT yet a second hardcoded address: V2's contracts
+ * are not deployed (this repository's V2 work is source+tests only, per
+ * every V2 task's own explicit instruction not to deploy), so there is no
+ * real address to freeze yet. It resolves through getActiveDeployment()
+ * for now, the same way "canary-v1" originally (and, in retrospect,
+ * incorrectly) did - once V2 is actually deployed and its own addresses are
+ * tracked in the manifest, "v2" should be frozen the same way "canary-v1"
+ * is frozen above, before any LATER deployment might ever make it stop
+ * being the active one. Never reuse "v2" as a deploymentId for anything
+ * else once a real V2 TickerNFT's base URI has been minted with it.
  */
 const KNOWN_DEPLOYMENTS: Record<string, () => DeploymentIdentity | null> = {
-  "canary-v1": () => getActiveDeployment(),
+  "canary-v1": () => FROZEN_CANARY_V1_DEPLOYMENT,
+  v2: () => getActiveDeployment(),
 };
 
 export function getKnownDeploymentById(deploymentId: string): DeploymentIdentity | null {

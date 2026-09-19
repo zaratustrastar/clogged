@@ -196,6 +196,47 @@ describe("app/api/ticker-metadata/[...slug] route", () => {
       expect(data.image).toBe("https://clog.run/api/ticker-image/canary-v1/1");
     });
 
+    it("canary-v1's description keeps the existing, unspecific fee wording - never V2's specific 40%/0.6%/0.24% numbers, which would misstate canary's own different, already-deployed economics", async () => {
+      readContractMock.mockResolvedValueOnce("CANCAT");
+      const { GET } = await loadRouteConfigured();
+      const res = await GET(makeRequest("canary-v1", "1"), { params: { slug: ["canary-v1", "1"] } });
+      const data = await res.json();
+      expect(data.description).not.toContain("40%");
+      expect(data.description).not.toContain("0.24%");
+      expect(data.description).toContain("earns a share of every");
+    });
+
+    it("the v2 deploymentId's metadata uses V2's own image route and states V2's specific, accurate economics (40% of the 0.6% tax, 0.24% of gross volume) - and never claims the NFT holder receives the separate 5% secondary-sale royalty, which belongs to the multisig instead", async () => {
+      readContractMock.mockResolvedValueOnce("NEWDOG");
+      const { GET } = await loadRouteConfigured();
+      const res = await GET(makeRequest("v2", "1"), { params: { slug: ["v2", "1"] } });
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.name).toBe("$NEWDOG — CLOG Ticker");
+      expect(data.image).toBe("https://clog.run/api/ticker-image/v2/1");
+      expect(data.attributes).toContainEqual({ trait_type: "Deployment", value: "v2" });
+      expect(data.description).toContain("40%");
+      expect(data.description).toContain("0.6%");
+      expect(data.description).toContain("0.24%");
+      expect(data.description).not.toContain("5%");
+      expect(data.description.toLowerCase()).not.toContain("royalty");
+    });
+
+    it("REGRESSION GUARD: canary-v1 metadata stays frozen to its own real registry even when the active env is reconfigured to a different (V2-like) deployment", async () => {
+      readContractMock.mockResolvedValueOnce("CANCAT");
+      vi.resetModules();
+      const postCutoverAddress = "0x9999999999999999999999999999999999999f";
+      Object.assign(process.env, CONFIGURED_ENV, { NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS: postCutoverAddress });
+      const { GET } = await import("@/app/api/ticker-metadata/[...slug]/route");
+
+      const res = await GET(makeRequest("canary-v1", "1"), { params: { slug: ["canary-v1", "1"] } });
+      expect(res.status).toBe(200);
+
+      const calledWith = readContractMock.mock.calls[0][0];
+      expect(calledWith.address.toLowerCase()).not.toBe(postCutoverAddress);
+      expect(calledWith.address.toLowerCase()).not.toBe(CONFIGURED_ENV.NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS.toLowerCase());
+    });
+
     it("queries canary-v1's own fixed registry address, neither HOOD's nor the active deployment's", async () => {
       readContractMock.mockResolvedValueOnce("CANCAT");
       const { GET } = await loadRouteConfigured();

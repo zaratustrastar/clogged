@@ -134,6 +134,49 @@ describe("app/api/ticker-image/[...slug] route", () => {
       const res = await GET(makeRequest("canary-v1", "abc"), { params: { slug: ["canary-v1", "abc"] } });
       expect(res.status).toBe(400);
     });
+
+    it("canary-v1 uses V1 artwork (generated gradient, no embedded base image) - never V2's claw-machine artwork", async () => {
+      readContractMock.mockResolvedValueOnce("CANCAT");
+      const { GET } = await loadRouteConfigured();
+      const res = await GET(makeRequest("canary-v1", "1"), { params: { slug: ["canary-v1", "1"] } });
+      const svg = await res.text();
+      expect(svg).not.toContain("data:image/jpeg;base64,");
+      expect(svg).toContain("linearGradient"); // V1's own generated-background signature
+    });
+
+    it("the v2 deploymentId selects V2 artwork (embedded claw-machine base image, no per-token generated gradient)", async () => {
+      readContractMock.mockResolvedValueOnce("NEWDOG");
+      const { GET } = await loadRouteConfigured();
+      const res = await GET(makeRequest("v2", "1"), { params: { slug: ["v2", "1"] } });
+      expect(res.status).toBe(200);
+      const svg = await res.text();
+      expect(svg).toContain("$NEWDOG");
+      expect(svg).toContain("data:image/jpeg;base64,");
+      expect(svg).not.toContain("linearGradient"); // never V1's own generated-background signature
+    });
+
+    it("REGRESSION GUARD: canary-v1 stays frozen to its own real registry even when the active env is reconfigured to a different (V2-like) deployment - the exact bug this deployment-scoping fix closes", async () => {
+      readContractMock.mockResolvedValueOnce("CANCAT");
+
+      // Simulate the post-V2-cutover world: reset modules and reconfigure
+      // the active env to a brand new registry address BEFORE re-importing
+      // the route, so env.ts itself re-evaluates against the new value
+      // (module-level env parsing only re-runs on a fresh import after
+      // vi.resetModules() - mutating process.env after the module has
+      // already loaded would not exercise this correctly).
+      vi.resetModules();
+      const postCutoverAddress = "0x9999999999999999999999999999999999999f";
+      Object.assign(process.env, CONFIGURED_ENV, { NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS: postCutoverAddress });
+      const { GET } = await import("@/app/api/ticker-image/[...slug]/route");
+
+      await GET(makeRequest("canary-v1", "1"), { params: { slug: ["canary-v1", "1"] } });
+
+      const calledWith = readContractMock.mock.calls[0][0];
+      // Still resolves to canary-v1's own frozen, real registry - NOT the
+      // now-active (V2-like) address the env was just switched to.
+      expect(calledWith.address.toLowerCase()).not.toBe(postCutoverAddress);
+      expect(calledWith.address.toLowerCase()).not.toBe(CONFIGURED_ENV.NEXT_PUBLIC_TICKER_REGISTRY_ADDRESS.toLowerCase());
+    });
   });
 
   describe("cross-deployment collision safety", () => {

@@ -73,6 +73,7 @@ export async function GET(request: NextRequest, { params }: { params: { slug: st
 
   const ticker = result.ticker;
   const profile = await profileStore.get(tokenIdNum, deployment);
+  const isV2 = slug.length === 2 && slug[0] === "v2";
 
   // TickerNFT artwork is deliberately NEVER the user-uploaded meme image.
   // The NFT represents ownership of the ticker identity itself (closer to
@@ -87,10 +88,23 @@ export async function GET(request: NextRequest, { params }: { params: { slug: st
   // socials - there is no separate "description" field to pull from, so one
   // is generated here rather than inventing a field that doesn't exist in
   // the product. The launcher's own display name (if given) is folded into
-  // it; the ticker-based name below matches the spec's own example exactly.
+  // it. V2's own economics (40% of the 0.6% trading tax, i.e. 0.24% of
+  // gross trading volume - see BondingCurveClog.sol's TICKER_OWNER_TAX_BPS/
+  // BUY_TAX_BPS/SELL_TAX_BPS) are stated specifically and only for the V2
+  // deployment: legacy HOOD and canary-v1 run different, already-deployed
+  // economics (20% of a 0.5% tax), so applying V2's own numbers to their
+  // metadata would be factually wrong for those tokens - they keep the
+  // existing, deliberately unspecific wording instead. Neither version ever
+  // claims the NFT holder receives the separate 5% ERC-2981 secondary-sale
+  // royalty (V2 only) - that belongs to the protocol multisig, not the
+  // ticker owner, and is a completely different revenue stream (see
+  // TickerNFT.sol's own docs).
+  const feeDescription = isV2
+    ? `the TickerNFT owner receives 40% of the 0.6% buy/sell trading tax on every $${ticker} trade (0.24% of gross trading volume)`
+    : `the TickerNFT owner earns a share of every $${ticker} trade`;
   const description = profile?.displayName
-    ? `${profile.displayName} ($${ticker}) — a meme launched on CLOG. Unique inside CLOG; the TickerNFT owner earns a share of every $${ticker} trade.`
-    : `$${ticker} — a meme launched on CLOG. Unique inside CLOG; the TickerNFT owner earns a share of every $${ticker} trade.`;
+    ? `${profile.displayName} ($${ticker}) — a meme launched on CLOG. Unique inside CLOG; ${feeDescription}.`
+    : `$${ticker} — a meme launched on CLOG. Unique inside CLOG; ${feeDescription}.`;
 
   const attributes: { trait_type: string; value: string | number }[] = [
     { trait_type: "Ticker", value: ticker },
