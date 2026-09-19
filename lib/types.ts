@@ -84,7 +84,7 @@ export interface ClaimableReward {
    * exactly and previously lost precision when converted back to a bigint
    * for display). */
   amountWei: bigint;
-  windowClosesAt: string; // 90-day claim expiry
+  windowClosesAt: string; // 5-day claim expiry
 }
 
 export interface OwnedTickerNFT {

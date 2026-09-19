@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {MemeToken} from "../src/MemeToken.sol";
 import {BondingCurveClog} from "../src/BondingCurveClog.sol";
 import {EligibilityRegistry} from "../src/EligibilityRegistry.sol";
@@ -73,8 +74,8 @@ contract BondingCurveClogTest is Test {
         vm.prank(alice);
         market.buy{value: 1 ether}(0, block.timestamp);
 
-        uint256 expectedTax = (1 ether * 50) / 10_000; // 0.5%
-        uint256 expectedOwner = (expectedTax * 2000) / 10_000;
+        uint256 expectedTax = (1 ether * 60) / 10_000; // 0.6%
+        uint256 expectedOwner = (expectedTax * 4000) / 10_000;
         uint256 expectedMultisigFromTax = (expectedTax * 1000) / 10_000;
 
         assertEq(market.pendingWithdrawals(ticketOwner), expectedOwner, "ticker owner tax share credited");
@@ -85,6 +86,119 @@ contract BondingCurveClogTest is Test {
         assertEq(ticketOwner.balance, 0);
         market.withdraw(ticketOwner);
         assertEq(ticketOwner.balance, expectedOwner);
+    }
+
+    function test_sell_taxRoutedCorrectly() public {
+        vm.startPrank(alice);
+        uint256 tokensOut = market.buy{value: 1 ether}(0, block.timestamp);
+        token.approve(address(market), tokensOut);
+
+        uint256 ownerBefore = market.pendingWithdrawals(ticketOwner);
+        uint256 multisigBefore = market.pendingWithdrawals(multisig);
+        uint256 winnerPotBefore = winnerPot.balance;
+
+        (uint256 netEthOut,) = market.sell(tokensOut, 0, block.timestamp);
+        vm.stopPrank();
+
+        // grossPayout is netEthOut + the tax actually deducted from it - reconstruct via the
+        // real BPS math rather than assuming a specific netEthOut, so this test still holds
+        // regardless of curve slippage on this particular trade.
+        uint256 grossPayout = (netEthOut * 10_000) / (10_000 - market.SELL_TAX_BPS());
+        uint256 expectedTax = (grossPayout * market.SELL_TAX_BPS()) / 10_000;
+        uint256 expectedOwner = (expectedTax * market.TICKER_OWNER_TAX_BPS()) / 10_000;
+        uint256 expectedMultisig = (expectedTax * market.MULTISIG_TAX_BPS()) / 10_000;
+
+        assertApproxEqAbs(
+            market.pendingWithdrawals(ticketOwner) - ownerBefore, expectedOwner, 1, "ticker owner sell-tax share credited (40%)"
+        );
+        assertApproxEqAbs(
+            market.pendingWithdrawals(multisig) - multisigBefore, expectedMultisig, 1, "multisig sell-tax share credited (10%)"
+        );
+        assertGt(winnerPot.balance, winnerPotBefore, "winnerPot received the remaining 50% of the sell tax, pushed directly");
+    }
+
+    /// @notice The 40/10/50 split is BPS-of-the-tax, computed via two mulDiv calls with the third
+    ///         leg taken as the exact residual (taxAmount - toOwner - toMultisig, never its own
+    ///         mulDiv) - so all three legs must sum to EXACTLY taxAmount, for every trade size,
+    ///         including ones that don't divide evenly. No rounding dust is ever lost or created;
+    ///         it always lands with the residual (WinnerPot) leg, never silently dropped.
+    ///
+    ///         Isolates a single buy's own tax credits from CLOG-extraction credits (a separate,
+    ///         unrelated 10/90 split on CLOG revenue, unchanged by this task, that also credits
+    ///         ticketOwner/multisig/winnerPot and would otherwise pollute this measurement) by
+    ///         first establishing a high-water mark with a large buy, then selling most of it back
+    ///         (dropping well below the hwm, which stays put - the same buy/sell/hwm pattern
+    ///         test_clog_releasesOnNewTerritoryOnly already relies on), so the final, small,
+    ///         precisely-sized buy stays inside already-released territory and triggers zero new
+    ///         CLOG release at all.
+    function test_taxSplit_roundingBehavior_exact() public {
+        vm.startPrank(alice);
+        uint256 hwmTokens = market.buy{value: 5 ether}(0, block.timestamp);
+        token.approve(address(market), hwmTokens);
+        market.sell(hwmTokens - 1, 0, block.timestamp); // keep 1 wei of tokens so the position stays open, well below hwm
+        vm.stopPrank();
+        uint256 clogRemainingBeforeFinalBuy = market.clogRemaining();
+
+        // 777 wei of tax does not divide evenly by 10_000 in either the 40% or 10% leg - exactly
+        // the kind of amount that would reveal a rounding-dust bug if one existed.
+        uint256 grossAmount = 777 * 10_000 / market.BUY_TAX_BPS(); // sized so the resulting tax is exactly 777 wei
+        vm.deal(alice, grossAmount + 1 ether);
+
+        uint256 ownerBefore = market.pendingWithdrawals(ticketOwner);
+        uint256 multisigBefore = market.pendingWithdrawals(multisig);
+        uint256 winnerPotBefore = winnerPot.balance;
+
+        vm.prank(alice);
+        market.buy{value: grossAmount}(0, block.timestamp);
+
+        assertEq(market.clogRemaining(), clogRemainingBeforeFinalBuy, "final buy stayed below the hwm - zero new CLOG release, so no CLOG-extraction noise in the deltas below");
+
+        uint256 taxAmount = (grossAmount * market.BUY_TAX_BPS()) / 10_000;
+        uint256 toOwner = market.pendingWithdrawals(ticketOwner) - ownerBefore;
+        uint256 toMultisig = market.pendingWithdrawals(multisig) - multisigBefore;
+        uint256 toWinnerPot = winnerPot.balance - winnerPotBefore;
+
+        assertEq(toOwner + toMultisig + toWinnerPot, taxAmount, "the three tax legs must sum to EXACTLY the tax amount - no dust lost or created anywhere");
+        assertEq(toOwner, (taxAmount * 4_000) / 10_000, "owner leg is exactly 40% of tax, rounded down");
+        assertEq(toMultisig, (taxAmount * 1_000) / 10_000, "multisig leg is exactly 10% of tax, rounded down");
+        // WinnerPot (the residual leg) absorbs whatever the two mulDiv roundings left over -
+        // always >= the bare 50% mulDiv would give, never less, and the three legs still sum
+        // exactly to taxAmount as asserted above.
+        assertGe(toWinnerPot, (taxAmount * 5_000) / 10_000, "winnerPot (residual leg) must be at least the bare 50% mulDiv result");
+    }
+
+    function test_pullPaymentAccounting_remainsSolventAcrossManyTrades() public {
+        // A sequence of interleaved buys/sells across two traders, none of whom ever withdraw -
+        // pendingWithdrawals for ticketOwner/multisig accumulate the whole time. The contract's
+        // actual ETH balance must always cover realETH (the curve's own reserve) PLUS every
+        // outstanding pull-payment balance - it must never owe more than it holds, at any point
+        // in the sequence, not just at the end.
+        uint256[6] memory amounts = [uint256(0.3 ether), 0.7 ether, 1.1 ether, 0.05 ether, 2 ether, 0.4 ether];
+        for (uint256 i = 0; i < amounts.length; i++) {
+            address trader = i % 2 == 0 ? alice : bob;
+            vm.prank(trader);
+            uint256 tokensOut = market.buy{value: amounts[i]}(0, block.timestamp);
+            _assertSolvent();
+
+            if (i % 3 == 2 && tokensOut > 0) {
+                vm.startPrank(trader);
+                token.approve(address(market), tokensOut / 2);
+                market.sell(tokensOut / 2, 0, block.timestamp);
+                vm.stopPrank();
+                _assertSolvent();
+            }
+        }
+
+        // Withdrawing must not break solvency either - the balance drops by exactly what was owed.
+        market.withdraw(ticketOwner);
+        _assertSolvent();
+        market.withdraw(multisig);
+        _assertSolvent();
+    }
+
+    function _assertSolvent() internal view {
+        uint256 owed = market.realETH() + market.pendingWithdrawals(ticketOwner) + market.pendingWithdrawals(multisig);
+        assertGe(address(market).balance, owed, "contract's actual ETH balance must cover realETH plus every outstanding pull-payment balance");
     }
 
     function test_withdraw_anyoneCanTriggerPayoutButOnlyToTheRecipient() public {
@@ -164,6 +278,50 @@ contract BondingCurveClogTest is Test {
         assertEq(
             clogAfterRebuy, clogAfterFirstBuy, "re-buying within already-visited territory must release zero CLOG"
         );
+    }
+
+    /// @notice Task B/A explicitly does NOT touch CLOG extraction economics - still 10%
+    ///         multisig / 90% WinnerPot of whatever CLOG revenue a buy actually extracts. This
+    ///         pins that split directly against a real ClogRevenueExtracted event's own
+    ///         `extracted` amount, independent of the trading-tax split (a separate mechanism
+    ///         entirely - see test_taxSplit_roundingBehavior_exact's own isolation of the two).
+    function test_clogExtraction_stillTenNinety() public {
+        uint256 ownerBefore = market.pendingWithdrawals(ticketOwner);
+        uint256 multisigBefore = market.pendingWithdrawals(multisig);
+        uint256 winnerPotBefore = winnerPot.balance;
+
+        vm.recordLogs();
+        vm.prank(alice);
+        market.buy{value: 5 ether}(0, block.timestamp);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 extracted;
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == keccak256("ClogRevenueExtracted(uint256,uint256,uint256)")) {
+                (extracted,,) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "this buy must establish new territory and extract CLOG revenue");
+        assertGt(extracted, 0);
+
+        // Isolate the CLOG-extraction-only contribution: total delta minus the trading-tax
+        // contribution (computed independently via the real BUY_TAX_BPS/TICKER_OWNER_TAX_BPS/
+        // MULTISIG_TAX_BPS, exactly as test_buy_taxRoutedCorrectly does).
+        uint256 taxAmount = (5 ether * market.BUY_TAX_BPS()) / 10_000;
+        uint256 taxToOwner = (taxAmount * market.TICKER_OWNER_TAX_BPS()) / 10_000;
+        uint256 taxToMultisig = (taxAmount * market.MULTISIG_TAX_BPS()) / 10_000;
+
+        uint256 clogToMultisig = (market.pendingWithdrawals(multisig) - multisigBefore) - taxToMultisig;
+        uint256 clogToWinnerPot = (winnerPot.balance - winnerPotBefore) - (taxAmount - taxToOwner - taxToMultisig);
+
+        assertEq(clogToMultisig, (extracted * market.MULTISIG_CLOG_BPS()) / 10_000, "CLOG extraction's own multisig leg is still exactly 10% of extracted, unchanged by this task");
+        assertEq(clogToWinnerPot, extracted - clogToMultisig, "CLOG extraction's own WinnerPot leg is still the residual (~90%), unchanged by this task");
+        assertEq(market.pendingWithdrawals(ticketOwner) - ownerBefore, taxToOwner, "CLOG extraction has no ticker-owner leg at all - the owner's own pending balance changes ONLY by the trading-tax portion");
+        assertEq(market.MULTISIG_CLOG_BPS(), 1_000, "CLOG extraction split constant itself is untouched: still 10%");
+        assertEq(market.WINNERPOT_CLOG_BPS(), 9_000, "CLOG extraction split constant itself is untouched: still 90%");
     }
 
     function test_clog_freshBuyBeyondPriorHwm_releasesMore() public {

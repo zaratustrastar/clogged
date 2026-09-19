@@ -235,28 +235,28 @@ contract RewardVaultTest is Test {
         vault.claimBatch(roundIds, alice);
     }
 
-    // ── 90-day expiration + rollover ──────────────────────────────────────
+    // ── 5-day expiration + rollover ──────────────────────────────────────
 
-    function test_claimAfter90Days_reverts() public {
+    function test_claimAfter5Days_reverts() public {
         uint256 windowStart = this._now();
         market.distribute(alice, 100 ether);
         vm.warp(windowStart + 3600);
         _fund(10 ether);
         vault.allocateRound(1, 7, address(market), windowStart, this._now());
 
-        vm.warp(this._now() + 90 days + 1);
+        vm.warp(this._now() + 5 days + 1);
         vm.expectRevert();
         vault.claim(1, alice);
     }
 
-    function test_claimJustBefore90Days_succeeds() public {
+    function test_claimJustBefore5Days_succeeds() public {
         uint256 windowStart = this._now();
         market.distribute(alice, 100 ether);
         vm.warp(windowStart + 3600);
         _fund(10 ether);
         vault.allocateRound(1, 7, address(market), windowStart, this._now());
 
-        vm.warp(this._now() + 90 days - 1);
+        vm.warp(this._now() + 5 days - 1);
         vault.claim(1, alice);
         assertTrue(vault.claimed(1, alice));
     }
@@ -270,7 +270,7 @@ contract RewardVaultTest is Test {
         vault.allocateRound(1, 7, address(market), windowStart, this._now());
 
         vault.claim(1, alice);
-        vm.warp(this._now() + 90 days + 1);
+        vm.warp(this._now() + 5 days + 1);
 
         uint256 poolBefore = vault.unallocatedPool();
         vault.sweepExpired(1);
@@ -291,7 +291,7 @@ contract RewardVaultTest is Test {
         vm.warp(windowStart + 3600);
         _fund(10 ether);
         vault.allocateRound(1, 7, address(market), windowStart, this._now());
-        vm.warp(this._now() + 90 days + 1);
+        vm.warp(this._now() + 5 days + 1);
         vault.sweepExpired(1);
         vm.expectRevert();
         vault.sweepExpired(1);
@@ -314,7 +314,7 @@ contract RewardVaultTest is Test {
         vm.warp(windowStart + 3600);
         _fund(10 ether);
         vault.allocateRound(1, 7, address(market), windowStart, this._now());
-        vm.warp(this._now() + 90 days + 1);
+        vm.warp(this._now() + 5 days + 1);
         vault.sweepExpired(1);
         vm.expectRevert();
         vault.claim(1, bob);
@@ -338,7 +338,7 @@ contract RewardVaultTest is Test {
 
         RewardVault.RoundAllocation memory a = vault.getAllocation(1);
         assertLe(a.totalClaimed, a.jackpotAmount, "sum of claims can never exceed the jackpot");
-        vm.warp(this._now() + 90 days + 1);
+        vm.warp(this._now() + 5 days + 1);
         uint256 poolBefore = vault.unallocatedPool();
         vault.sweepExpired(1);
         assertEq(vault.unallocatedPool() - poolBefore, a.jackpotAmount - a.totalClaimed);
@@ -390,5 +390,99 @@ contract RewardVaultTest is Test {
         vault.allocateRound(1, 7, address(market), windowStart, windowEnd);
         vm.expectRevert();
         vault.allocateRound(1, 7, address(market), windowStart, windowEnd);
+    }
+
+    // ── P0 regression: token launched mid-round must not create phantom pre-launch supply ──
+    //
+    // _circulatingTwab used to subtract a holder's/market's own twabOf from the token's bare,
+    // fixed TOTAL_SUPPLY constant - correct ONLY if the token existed for the round's entire
+    // window. A token launched (setMarket called, minting the fixed supply) AFTER windowOpen
+    // did not exist - had zero actual supply - for the portion of the window before launch.
+    // Treating the full 1B supply as though it existed for that pre-launch portion too inflates
+    // the denominator with phantom supply that was never real, silently shrinking every real
+    // holder's payout. These tests create the MockMarket (which mints the whole fixed supply
+    // inside its own constructor via setMarket) AFTER capturing windowStart, so the token
+    // genuinely does not exist for the earlier part of the window - exactly reproducing a token
+    // launched substantially after a round has already opened.
+
+    function test_TWAB_tokenExistsBeforeRoundStart_behaviorUnchanged() public {
+        // Baseline / non-regression: the token (from setUp) already existed before windowStart
+        // captured here, so the fix must not change this already-correct case at all.
+        uint256 windowStart = this._now();
+        market.distribute(alice, 1_000_000_000e18); // entire fixed supply to alice
+        vm.warp(windowStart + 3600);
+        uint256 windowEnd = this._now();
+
+        _fund(10 ether);
+        vault.allocateRound(101, 7, address(market), windowStart, windowEnd);
+
+        uint256 before = alice.balance;
+        vault.claim(101, alice);
+        assertApproxEqAbs(alice.balance - before, 10 ether, 1e12, "sole holder for the whole window must get ~100% when the token predates the round");
+    }
+
+    function test_TWAB_tokenLaunchesHalfwayThroughRound_soleHolderGetsFullJackpot() public {
+        uint256 windowStart = this._now();
+        vm.warp(windowStart + 1800); // halfway through a 1-hour window: token does not exist yet
+
+        MockMarket lateMarket = new MockMarket("Late", "LATE");
+        lateMarket.distribute(alice, 1_000_000_000e18); // alice becomes the sole non-market holder
+
+        vm.warp(windowStart + 3600); // round closes, 1 hour after windowStart
+        uint256 windowEnd = this._now();
+
+        _fund(10 ether);
+        vault.allocateRound(102, 7, address(lateMarket), windowStart, windowEnd);
+
+        uint256 before = alice.balance;
+        vault.claim(102, alice);
+        assertApproxEqAbs(
+            alice.balance - before,
+            10 ether,
+            1e12,
+            "the sole holder for the token's entire real existence must get ~100% of the jackpot, regardless of when within the round the token itself launched"
+        );
+    }
+
+    function test_TWAB_tokenLaunchesHalfwayThroughRound_multipleHolders_sharesSumCorrectly() public {
+        uint256 windowStart = this._now();
+        vm.warp(windowStart + 1800);
+
+        MockMarket lateMarket = new MockMarket("Late", "LATE");
+        lateMarket.distribute(alice, 300_000_000e18); // 30% of supply
+        lateMarket.distribute(bob, 700_000_000e18); // 70% of supply
+
+        vm.warp(windowStart + 3600);
+        uint256 windowEnd = this._now();
+
+        _fund(10 ether);
+        vault.allocateRound(103, 7, address(lateMarket), windowStart, windowEnd);
+
+        uint256 aliceBefore = alice.balance;
+        uint256 bobBefore = bob.balance;
+        vault.claim(103, alice);
+        vault.claim(103, bob);
+        uint256 aliceGot = alice.balance - aliceBefore;
+        uint256 bobGot = bob.balance - bobBefore;
+
+        assertApproxEqAbs(aliceGot, 3 ether, 1e12, "alice held 30% of the token's entire real supply for its entire real existence");
+        assertApproxEqAbs(bobGot, 7 ether, 1e12, "bob held 70% of the token's entire real supply for its entire real existence");
+        assertApproxEqAbs(aliceGot + bobGot, 10 ether, 1e12, "the two real holders' shares must sum to essentially the whole jackpot, since together they held all of the token's real circulating supply the whole time it existed");
+    }
+
+    function test_TWAB_buyingAfterRoundClose_stillGetsZero() public {
+        uint256 windowStart = this._now();
+        market.distribute(alice, 1_000_000_000e18);
+        vm.warp(windowStart + 3600);
+        uint256 windowEnd = this._now();
+
+        _fund(10 ether);
+        vault.allocateRound(104, 7, address(market), windowStart, windowEnd);
+
+        // bob buys in only after the round's own window has already closed.
+        vm.prank(alice);
+        token.transfer(bob, 500_000_000e18);
+
+        assertEq(vault.previewClaim(104, bob), 0, "a holder who only acquired tokens after windowClose must get zero, never a phantom share");
     }
 }

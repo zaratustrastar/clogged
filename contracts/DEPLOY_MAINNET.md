@@ -420,12 +420,12 @@ before.
 
 ## Product mechanics — unchanged, not renegotiable at deployment time
 
-Launch fee 0.002 ETH (10% protocol multisig / 90% WinnerPot), 1B supply
-(900M curve / 100M CLOG reserve, 0% to the creator), 0.5% trade tax (0.10%
-ticker owner / 0.05% protocol / 0.35% WinnerPot), 5% *current* curve
+Launch fee 0.002 ETH (100% protocol multisig / 0% WinnerPot), 1B supply
+(900M curve / 100M CLOG reserve, 0% to the creator), 0.6% trade tax (0.24%
+ticker owner / 0.06% protocol / 0.30% WinnerPot), 5% *current* curve
 progress (not a permanent high-water mark) + 0.229 ETH real reserve held
 continuously for 30 minutes to qualify, minimum 3 candidates to draw,
-uniform 1-in-N odds, TWAB-weighted claims with a 90-day window. None of
+uniform 1-in-N odds, TWAB-weighted claims with a 5-day window. None of
 this changes for a canary launch — "small real amounts" means launching a
 small number of memes and trading small ETH amounts against the real,
 unmodified contracts.

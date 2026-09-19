@@ -86,7 +86,7 @@ contract TickerRegistryTest is Test {
         uint256 multisigBefore = multisig.balance;
         uint256 winnerPotBefore = winnerPot.balance;
         _commitAndReveal(alice, "cat", bytes32("salt1"));
-        uint256 expectedMultisig = (0.002 ether * 1000) / 10000;
+        uint256 expectedMultisig = (0.002 ether * 10000) / 10000;
         assertEq(multisig.balance - multisigBefore, expectedMultisig);
         assertEq(winnerPot.balance - winnerPotBefore, 0.002 ether - expectedMultisig);
     }
@@ -106,6 +106,17 @@ contract TickerRegistryTest is Test {
         nft.transferFrom(alice, bob, 1);
 
         assertEq(market.ticketOwnerRecipient(), bob, "fee recipient must update immediately, no migration step");
+
+        // Task D: the redirect must carry the real 40% owner share, not just the address - a
+        // subsequent trade's own tax must credit bob (the new owner), never alice, at exactly
+        // TICKER_OWNER_TAX_BPS (40% of the tax).
+        vm.deal(bob, 10 ether);
+        vm.prank(bob);
+        market.buy{value: 1 ether}(0, block.timestamp);
+        uint256 expectedTax = (1 ether * market.BUY_TAX_BPS()) / 10_000;
+        uint256 expectedOwnerShare = (expectedTax * market.TICKER_OWNER_TAX_BPS()) / 10_000;
+        assertEq(market.pendingWithdrawals(bob), expectedOwnerShare, "new owner (bob) receives exactly 40% of the tax on the very next trade");
+        assertEq(market.pendingWithdrawals(alice), 0, "old owner (alice) receives nothing from any trade after the transfer");
     }
 
     function test_publicTickerCap_enforced() public {

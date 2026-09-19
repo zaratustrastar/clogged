@@ -47,6 +47,14 @@ contract MemeToken is ERC20 {
     ///         called; permanently fixed forever after.
     address public market;
 
+    /// @notice block.timestamp of `setMarket` - the instant the token's entire fixed supply was
+    ///         minted into existence. 0 until then, permanently fixed after. Because this token
+    ///         has exactly one mint event and no subsequent mint/burn path anywhere, this single
+    ///         timestamp is sufficient to reconstruct the token's ACTUAL total-supply TWAB over
+    ///         any window via `totalSupplyTwab` below: zero before this moment (the token simply
+    ///         did not exist yet), TOTAL_SUPPLY at and after it.
+    uint256 public marketInitializedAt;
+
     event MarketInitialized(address indexed market);
 
     struct Checkpoint {
@@ -71,6 +79,7 @@ contract MemeToken is ERC20 {
         require(market == address(0), "MemeToken: already initialized");
         require(market_ != address(0), "MemeToken: zero market");
         market = market_;
+        marketInitializedAt = block.timestamp;
         _mint(market_, TOTAL_SUPPLY);
         emit MarketInitialized(market_);
     }
@@ -128,6 +137,33 @@ contract MemeToken is ERC20 {
         require(toT >= fromT, "MemeToken: bad window");
         if (toT == fromT) return balanceOf(account);
         return (cumulativeAt(account, toT) - cumulativeAt(account, fromT)) / (toT - fromT);
+    }
+
+    /// @notice The time-weighted average of this token's ACTUAL total supply over [fromT, toT] -
+    ///         NOT the bare TOTAL_SUPPLY constant. Zero before `marketInitializedAt` (the token
+    ///         did not exist yet - a round window that opened before this token launched must not
+    ///         count that pre-launch time as though 1B tokens already existed), TOTAL_SUPPLY once
+    ///         the window is entirely at or after `marketInitializedAt`. For a window straddling
+    ///         the launch moment, this is the correct linear blend: zero for the pre-launch
+    ///         portion, TOTAL_SUPPLY for the rest, averaged over the whole window - exactly the
+    ///         same step-function TWAB math `twabOf` already applies per-account, applied here to
+    ///         the token's own total supply (which is itself just as valid a "balance" as any
+    ///         account's: zero, then a single step up to TOTAL_SUPPLY, then constant forever,
+    ///         since no further mint/burn path exists anywhere in this contract).
+    ///
+    ///         This is what RewardVault._circulatingTwab must subtract a holder's/the market's own
+    ///         twabOf from - using the bare TOTAL_SUPPLY constant instead silently inflates the
+    ///         denominator with phantom pre-launch supply for any round whose window opened before
+    ///         this specific token launched, shrinking every real holder's payout below their true
+    ///         pro-rata share.
+    function totalSupplyTwab(uint256 fromT, uint256 toT) external view returns (uint256) {
+        require(toT >= fromT, "MemeToken: bad window");
+        bool existsThroughout = market != address(0) && marketInitializedAt <= fromT;
+        if (toT == fromT) return existsThroughout ? TOTAL_SUPPLY : 0;
+        if (market == address(0) || toT <= marketInitializedAt) return 0;
+        uint256 supplyStart = fromT > marketInitializedAt ? fromT : marketInitializedAt;
+        uint256 activeSeconds = toT - supplyStart;
+        return (TOTAL_SUPPLY * activeSeconds) / (toT - fromT);
     }
 
     function checkpointCount(address account) external view returns (uint256) {

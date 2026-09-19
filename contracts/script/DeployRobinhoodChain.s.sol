@@ -239,7 +239,7 @@ contract DeployRobinhoodChain is Script {
 
         // -- Rewards --
         require(d.rewardVault.roundManager() == address(d.roundManager), "RewardVault not pointed at RoundManager");
-        require(d.rewardVault.CLAIM_WINDOW() == 90 days, "claim window must be 90 days");
+        require(d.rewardVault.CLAIM_WINDOW() == 5 days, "claim window must be 5 days");
     }
 
     function _logSummary(Deployment memory d) internal view {

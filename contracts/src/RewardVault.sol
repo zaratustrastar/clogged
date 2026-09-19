@@ -6,7 +6,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 interface IMemeTokenTWAB {
     function twabOf(address account, uint256 fromT, uint256 toT) external view returns (uint256);
-    function TOTAL_SUPPLY() external view returns (uint256);
+    function totalSupplyTwab(uint256 fromT, uint256 toT) external view returns (uint256);
 }
 
 interface IHasToken {
@@ -29,7 +29,7 @@ interface IHasToken {
 ///      OWN (already-fixed) window simply never looks at, so it cannot change what's already been
 ///      allocated or what remains claimable.
 contract RewardVault is ReentrancyGuard {
-    uint256 public constant CLAIM_WINDOW = 90 days;
+    uint256 public constant CLAIM_WINDOW = 5 days;
     uint256 public constant BPS = 10_000;
 
     address public immutable roundManager;
@@ -148,13 +148,22 @@ contract RewardVault is ReentrancyGuard {
         a.totalClaimed += amount;
     }
 
+    /// @dev P0 fix: circulatingTwab is the token's ACTUAL total-supply TWAB over the round's own
+    ///      window (totalSupplyTwab - zero before the token's own launch, TOTAL_SUPPLY from launch
+    ///      onward) minus the market's own (unsold-inventory) TWAB over that same window - NEVER
+    ///      the bare, fixed TOTAL_SUPPLY constant. A token launched after a round's window has
+    ///      already opened did not have its full 1B supply in existence for the pre-launch portion
+    ///      of that window; using the fixed constant there silently inflates this denominator with
+    ///      phantom supply that was never real, shrinking every genuine holder's payout below their
+    ///      true pro-rata share (see test/RewardVault.t.sol's own "P0 regression" tests, which
+    ///      reproduce and pin this exact failure mode before this fix).
     function _circulatingTwab(RoundAllocation storage a) internal view returns (uint256) {
-        uint256 totalSupply = IMemeTokenTWAB(a.token).TOTAL_SUPPLY();
+        uint256 totalSupplyTwab = IMemeTokenTWAB(a.token).totalSupplyTwab(a.windowOpen, a.windowClose);
         uint256 marketTwab = IMemeTokenTWAB(a.token).twabOf(a.market, a.windowOpen, a.windowClose);
-        return totalSupply > marketTwab ? totalSupply - marketTwab : 0;
+        return totalSupplyTwab > marketTwab ? totalSupplyTwab - marketTwab : 0;
     }
 
-    /// @notice After the 90-day claim window, anyone may sweep whatever was never claimed (never-
+    /// @notice After the 5-day claim window, anyone may sweep whatever was never claimed (never-
     ///         claimed holders' shares AND integer-division dust from partial claims alike) back
     ///         into the live pool, where it rolls forward into whichever round next allocates.
     function sweepExpired(uint256 roundId) external {

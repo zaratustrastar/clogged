@@ -30,16 +30,16 @@ export const MIN_PROGRESS_BPS = 500; // EligibilityRegistry.MIN_PROGRESS_BPS (5%
 export const MIN_RESERVE_THRESHOLD_ETH = 0.229; // EligibilityRegistry.MIN_RESERVE_THRESHOLD
 export const REQUIRED_STREAK_SECONDS = 1_800; // EligibilityRegistry.REQUIRED_ABSOLUTE_SECONDS (30 min)
 
-export const CLAIM_WINDOW_DAYS = 90; // RewardVault.CLAIM_WINDOW
+export const CLAIM_WINDOW_DAYS = 5; // RewardVault.CLAIM_WINDOW
 
-// BondingCurveClog's trading fee: 0.5% total, split three ways. The split is
-// BPS-of-the-tax (TICKER_OWNER_TAX_BPS=2000 means 20% of the 0.5% tax, i.e.
-// 0.10% of trade value) - not 20% of trade value. Expressed here as direct
+// BondingCurveClog's trading fee: 0.6% total, split three ways. The split is
+// BPS-of-the-tax (TICKER_OWNER_TAX_BPS=4000 means 40% of the 0.6% tax, i.e.
+// 0.24% of trade value) - not 40% of trade value. Expressed here as direct
 // percentages of trade value to avoid that exact confusion in the UI.
-export const TRADE_TAX_PCT = 0.5; // BUY_TAX_BPS / SELL_TAX_BPS, each 50 bps of trade value
-export const TICKER_OWNER_FEE_PCT_OF_TRADE = 0.1; // 0.5% * (2000/10000)
-export const PROTOCOL_FEE_PCT_OF_TRADE = 0.05; // 0.5% * (1000/10000)
-export const WINNER_POT_FEE_PCT_OF_TRADE = 0.35; // 0.5% * (7000/10000)
+export const TRADE_TAX_PCT = 0.6; // BUY_TAX_BPS / SELL_TAX_BPS, each 60 bps of trade value
+export const TICKER_OWNER_FEE_PCT_OF_TRADE = 0.24; // 0.6% * (4000/10000)
+export const PROTOCOL_FEE_PCT_OF_TRADE = 0.06; // 0.6% * (1000/10000)
+export const WINNER_POT_FEE_PCT_OF_TRADE = 0.3; // 0.6% * (5000/10000)
 
 export function openSeaTickerUrl(tickerNftAddress: string, tokenId: number) {
   return `https://opensea.io/assets/${tickerNftAddress}/${tokenId}`;

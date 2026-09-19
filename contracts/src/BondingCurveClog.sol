@@ -43,13 +43,13 @@ contract BondingCurveClog is ReentrancyGuard {
     uint256 public constant CURVE_ALLOCATION = 900_000_000e18;
     uint256 public constant CLOG_ALLOCATION = 100_000_000e18;
 
-    // ── Trading tax (confirmed: 0.5% buy / 0.5% sell, split 20/10/70) ────────────
+    // ── Trading tax (confirmed: 0.6% buy / 0.6% sell, split 40/10/50) ────────────
     uint256 public constant BPS = 10_000;
-    uint256 public constant BUY_TAX_BPS = 50; // 0.5%
-    uint256 public constant SELL_TAX_BPS = 50; // 0.5%
-    uint256 public constant TICKER_OWNER_TAX_BPS = 2_000; // 20% of the tax
+    uint256 public constant BUY_TAX_BPS = 60; // 0.6%
+    uint256 public constant SELL_TAX_BPS = 60; // 0.6%
+    uint256 public constant TICKER_OWNER_TAX_BPS = 4_000; // 40% of the tax
     uint256 public constant MULTISIG_TAX_BPS = 1_000; // 10% of the tax
-    uint256 public constant WINNERPOT_TAX_BPS = 7_000; // 70% of the tax
+    uint256 public constant WINNERPOT_TAX_BPS = 5_000; // 50% of the tax
 
     // ── CLOG token-release rate (confirmed: r = 1/9, independent of extraction) ──
     uint256 public constant RELEASE_RATIO_BPS = 1_111; // ~1/9

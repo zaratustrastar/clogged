@@ -40,12 +40,15 @@ interface IEligibilityRegistryForLaunch {
 ///      detection: that is a materially harder problem than this product needs for v1, and an
 ///      ASCII-only alphabet has no homoglyphs to confuse in the first place.
 ///
-/// @dev LAUNCH PAYMENT ROUTING: the full 0.002 ETH launch price is split 10% multisig / 90%
-///      WinnerPot, via direct calls that must both succeed or the whole launch reverts. Simpler
-///      than BondingCurveClog's pending/retry WinnerPot pattern deliberately: a launch reverting
-///      because a payment leg failed costs the user nothing (the whole transaction reverts, ETH
-///      stays theirs) and they can simply retry -- unlike continuous trading, a one-time,
-///      user-initiated, freely-retriable action doesn't need the same liveness guarantee.
+/// @dev LAUNCH PAYMENT ROUTING: the full 0.002 ETH launch price goes 100% to multisig, 0% to
+///      WinnerPot (v2 economics -- v1 split 10% multisig / 90% WinnerPot). The multisig leg is a
+///      direct call that must succeed or the whole launch reverts -- a launch reverting because
+///      the payment leg failed costs the user nothing (the whole transaction reverts, ETH stays
+///      theirs) and they can simply retry -- unlike continuous trading, a one-time,
+///      user-initiated, freely-retriable action doesn't need BondingCurveClog's pending/retry
+///      WinnerPot liveness pattern. `winnerPot` itself is still a required constructor
+///      dependency and still passed to every newly-created BondingCurveClog market (trading tax
+///      revenue still funds RewardVault directly) -- only the launch-fee leg changed.
 contract TickerRegistry is ReentrancyGuard {
     uint256 public constant MAX_PUBLIC_TICKERS = 7_777;
     uint256 public constant LAUNCH_PRICE = 0.002 ether;
@@ -54,7 +57,7 @@ contract TickerRegistry is ReentrancyGuard {
     uint256 public constant MIN_REVEAL_DELAY = 60; // seconds -- minimal anti-frontrunning window
     uint256 public constant REVEAL_WINDOW = 1 days; // reveal must happen within this long after the delay
 
-    uint256 public constant MULTISIG_LAUNCH_BPS = 1_000; // 10%
+    uint256 public constant MULTISIG_LAUNCH_BPS = 10_000; // 100%
     uint256 public constant BPS = 10_000;
 
     bytes32 public constant RESERVED_CLOG_KEY = keccak256(bytes("CLOG"));
@@ -170,8 +173,13 @@ contract TickerRegistry is ReentrancyGuard {
         uint256 toWinnerPot = LAUNCH_PRICE - toMultisig;
         (bool ok1,) = multisig.call{value: toMultisig}("");
         require(ok1, "TickerRegistry: multisig payment failed");
-        (bool ok2,) = winnerPot.call{value: toWinnerPot}("");
-        require(ok2, "TickerRegistry: winnerPot payment failed");
+        // v2: toWinnerPot is 0 at the current MULTISIG_LAUNCH_BPS (100%) -- skip the call
+        // entirely rather than making a pointless zero-value external call. Kept general
+        // (not hardcoded to "always skip") so a future split change needs only the constant.
+        if (toWinnerPot > 0) {
+            (bool ok2,) = winnerPot.call{value: toWinnerPot}("");
+            require(ok2, "TickerRegistry: winnerPot payment failed");
+        }
     }
 
     /// @dev ASCII-only: uppercases a-z, passes through A-Z, reverts on anything else (digits,
