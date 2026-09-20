@@ -285,7 +285,7 @@ export const roundManagerAbi = [
   },
   {
     "type": "function",
-    "name": "roundDuration",
+    "name": "ROUND_DURATION",
     "inputs": [],
     "outputs": [
       {

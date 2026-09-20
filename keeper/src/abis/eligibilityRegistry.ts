@@ -271,7 +271,7 @@ export const eligibilityRegistryAbi = [
   },
   {
     "type": "function",
-    "name": "requiredAbsoluteSeconds",
+    "name": "REQUIRED_ABSOLUTE_SECONDS",
     "inputs": [],
     "outputs": [
       {

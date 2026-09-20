@@ -51,7 +51,7 @@ export async function qualifyMaturedTokens(
     clients.robinhoodPublic.readContract({
       address: config.eligibilityRegistry,
       abi: eligibilityRegistryAbi,
-      functionName: "requiredAbsoluteSeconds",
+      functionName: "REQUIRED_ABSOLUTE_SECONDS",
     }) as Promise<bigint>,
     clients.robinhoodPublic.readContract({
       address: config.eligibilityRegistry,

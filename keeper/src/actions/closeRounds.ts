@@ -33,7 +33,7 @@ export async function closeDueRounds(
     clients.robinhoodPublic.readContract({
       address: config.roundManager,
       abi: roundManagerAbi,
-      functionName: "roundDuration",
+      functionName: "ROUND_DURATION",
     }) as Promise<bigint>,
   ]);
 
