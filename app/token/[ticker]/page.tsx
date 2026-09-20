@@ -221,6 +221,7 @@ export default function TokenPage({ params }: { params: { ticker: string } }) {
       <TokenHeader
         ticker={ticker}
         name={t.name}
+        imageUrl={t.imageUrl}
         creator={formatAddress(t.creator)}
         ageLabel={formatTimeAgoShort(t.createdAt)}
         qualified={t.eligibility === "qualified"}

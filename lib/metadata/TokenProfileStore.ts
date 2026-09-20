@@ -24,6 +24,14 @@ export interface TokenProfile {
 
 export interface TokenProfileStore {
   get(tokenId: number): Promise<TokenProfile | null>;
+  /** Batch read for enriching a whole discovered token list in one round
+   *  trip (see lib/hooks/useTokenDiscovery.ts) rather than one HTTP request
+   *  per token. Returns only the profiles that actually exist - tokenIds
+   *  with no saved profile are simply absent from the map, never a null
+   *  entry, so callers use `.get(tokenId)` and treat a miss as "no
+   *  profile" the same way a 0-length tokenIds array or an empty result
+   *  set both naturally do. */
+  getMany(tokenIds: number[]): Promise<Map<number, TokenProfile>>;
   set(profile: TokenProfile): Promise<{ persisted: boolean }>;
 }
 
@@ -38,6 +46,22 @@ class HttpTokenProfileStore implements TokenProfileStore {
       // Network/server error - a missing profile is never fatal to the
       // surrounding UI, which always has real onchain data to fall back to.
       return null;
+    }
+  }
+
+  async getMany(tokenIds: number[]): Promise<Map<number, TokenProfile>> {
+    if (tokenIds.length === 0) return new Map();
+    try {
+      const res = await fetch(`/api/token-profiles?tokenIds=${tokenIds.join(",")}`);
+      if (!res.ok) return new Map();
+      const data = await res.json();
+      const profiles: TokenProfile[] = Array.isArray(data.profiles) ? data.profiles : [];
+      return new Map(profiles.map((p) => [p.tokenId, p]));
+    } catch {
+      // Same non-fatal handling as get() above - an enrichment failure
+      // just means every token in this batch keeps its onchain-only
+      // fallback (imageUrl: null, name: ticker), never a broken page.
+      return new Map();
     }
   }
 

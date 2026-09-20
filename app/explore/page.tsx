@@ -46,6 +46,7 @@ function ExploreContent() {
     const all: ExploreRow[] = (discovery.data ?? []).map((t) => ({
       ticker: `$${t.ticker}`,
       name: t.name,
+      imageUrl: t.imageUrl,
       priceEth: `${formatEthPrecise(t.priceEth)} ETH`,
       change1h: t.change1hPct,
       change24h: t.change24hPct,
