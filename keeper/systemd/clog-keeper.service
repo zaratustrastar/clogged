@@ -1,0 +1,55 @@
+# CLOG keeper systemd unit.
+#
+# NOT enabled or installed by this commit - see README.md's "Not yet
+# deployed" note. To install once approved:
+#
+#   sudo cp keeper/systemd/clog-keeper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   # do NOT `enable` or `start` until the operator has explicitly reviewed
+#   # and approved a real dry-run's output first (see README.md).
+#
+# Runs as a dedicated, unprivileged system user (`clog-keeper`) - NOT the
+# same `clog` user the frontend runs as, and NOT root. Create it first:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin clog-keeper
+#
+# EnvironmentFile holds KEEPER_PRIVATE_KEY - keep it at 600, owned by
+# clog-keeper:clog-keeper, OUTSIDE the git-tracked /opt/clogged tree (the
+# same pattern .env.production already uses for the frontend - see
+# VPS_RUNBOOK.md), e.g. /etc/clog-keeper/keeper.env. This unit file itself
+# is safe to track in git precisely because it contains no secret - only a
+# reference to where the real secret file lives on disk.
+
+[Unit]
+Description=CLOG keeper - permissionless round/qualification/randomness automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clog-keeper
+Group=clog-keeper
+WorkingDirectory=/opt/clogged/keeper
+EnvironmentFile=/etc/clog-keeper/keeper.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=10
+
+# Graceful shutdown: SIGTERM is systemd's own default stop signal - the
+# keeper's own SIGTERM handler (see src/index.ts) finishes the current loop
+# iteration before exiting. TimeoutStopSec bounds how long systemd waits
+# before escalating to SIGKILL if that graceful path somehow hangs (e.g. an
+# RPC call that never returns).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Defense in depth - this process should never need any of what these
+# restrict, since it only ever calls a fixed set of read/write JSON-RPC
+# methods over HTTPS and reads/writes its own lock file.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/clogged/keeper /var/lib/clog-keeper
+
+[Install]
+WantedBy=multi-user.target
