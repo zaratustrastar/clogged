@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { LEGACY_HOOD_DEPLOYMENT, FROZEN_CANARY_V1_DEPLOYMENT, getKnownDeploymentById, getActiveDeployment } from "@/lib/web3/deployments";
+import {
+  LEGACY_HOOD_DEPLOYMENT,
+  FROZEN_CANARY_V1_DEPLOYMENT,
+  FROZEN_V2_DEPLOYMENT,
+  getKnownDeploymentById,
+} from "@/lib/web3/deployments";
 import deploymentManifest from "@/deployments/robinhood-mainnet.json";
 
 /**
@@ -23,12 +28,10 @@ import deploymentManifest from "@/deployments/robinhood-mainnet.json";
  * (https://clog.run/api/ticker-metadata/canary-v1/) can never be changed
  * to point anywhere else once minted.
  *
- * The fix: canary-v1 now resolves to FROZEN_CANARY_V1_DEPLOYMENT, a fixed
- * constant capturing the canary's real, already-deployed identity at the
- * time this fix was made - permanently correct regardless of what the app
- * is actively configured to point at later. "v2" takes over the dynamic
- * getActiveDeployment() role canary-v1 used to have, since V2 has no real
- * deployed address of its own yet to freeze against.
+ * The fix: canary-v1 resolves to FROZEN_CANARY_V1_DEPLOYMENT forever.
+ * V2 has now also been deployed and receives the same treatment through
+ * FROZEN_V2_DEPLOYMENT. Neither historical deploymentId may follow the
+ * active manifest dynamically once its immutable metadata URI is live.
  */
 describe("canary-v1 deployment resolution (frozen, not dynamic)", () => {
   it("resolves to the canary's real, non-placeholder address", () => {
@@ -42,14 +45,17 @@ describe("canary-v1 deployment resolution (frozen, not dynamic)", () => {
     expect(resolved).toEqual(FROZEN_CANARY_V1_DEPLOYMENT);
   });
 
-  it("currently matches the manifest's own real values too (both correctly describe the same real, deployed canary right now)", () => {
-    // Not a test that canary-v1 TRACKS the manifest (the whole point of the
-    // fix is that it must NOT) - just confirming the frozen constant itself
-    // was captured correctly, by checking it against the same real values
-    // the manifest currently holds.
+  it("remains the original canary after the active manifest moves to V2", () => {
     const resolved = getKnownDeploymentById("canary-v1");
-    expect(resolved!.tickerRegistryAddress.toLowerCase()).toBe(deploymentManifest.contracts.tickerRegistry.toLowerCase());
-    expect(resolved!.chainId).toBe(deploymentManifest.chainId);
+
+    expect(resolved).toEqual({
+      chainId: 4663,
+      tickerRegistryAddress: "0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2",
+    });
+
+    expect(resolved!.tickerRegistryAddress.toLowerCase()).not.toBe(
+      deploymentManifest.contracts.tickerRegistry.toLowerCase()
+    );
   });
 
   it("REGRESSION GUARD: does NOT track getActiveDeployment() - the exact bug this fix closes", () => {
@@ -74,17 +80,38 @@ describe("canary-v1 deployment resolution (frozen, not dynamic)", () => {
   });
 });
 
-describe("v2 deployment resolution (dynamic, until V2 has a real deployed address to freeze)", () => {
-  it("resolves through getActiveDeployment() - the same dynamic role canary-v1 used to have", () => {
-    const v2 = getKnownDeploymentById("v2");
-    const active = getActiveDeployment();
-    expect(v2).toEqual(active);
+describe("v2 deployment resolution (frozen, not dynamic)", () => {
+  it("resolves to exactly FROZEN_V2_DEPLOYMENT", () => {
+    expect(getKnownDeploymentById("v2")).toEqual(
+      FROZEN_V2_DEPLOYMENT
+    );
   });
 
-  it("is a genuinely distinct deploymentId from canary-v1 - independently wired in KNOWN_DEPLOYMENTS, not merely coincidentally equal-valued right now", () => {
-    const source = readFileSync(path.join(process.cwd(), "lib/web3/deployments.ts"), "utf8");
-    expect(source).toMatch(/"canary-v1":\s*\(\)\s*=>\s*FROZEN_CANARY_V1_DEPLOYMENT/);
-    expect(source).toMatch(/v2:\s*\(\)\s*=>\s*getActiveDeployment\(\)/);
+  it("matches the active V2 deployment manifest", () => {
+    expect(FROZEN_V2_DEPLOYMENT.chainId).toBe(
+      deploymentManifest.chainId
+    );
+
+    expect(
+      FROZEN_V2_DEPLOYMENT.tickerRegistryAddress.toLowerCase()
+    ).toBe(
+      deploymentManifest.contracts.tickerRegistry.toLowerCase()
+    );
+  });
+
+  it("REGRESSION GUARD: does not track getActiveDeployment()", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "lib/web3/deployments.ts"),
+      "utf8"
+    );
+
+    const v2Line = source
+      .split("\n")
+      .find((line) => line.trim().startsWith("v2:"));
+
+    expect(v2Line).toBeDefined();
+    expect(v2Line).not.toContain("getActiveDeployment");
+    expect(v2Line).toContain("FROZEN_V2_DEPLOYMENT");
   });
 });
 

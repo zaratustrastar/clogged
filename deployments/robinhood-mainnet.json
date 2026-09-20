@@ -1,31 +1,29 @@
 {
   "$comment": "Public, non-secret Robinhood Chain Mainnet deployment identity for clog.run. Tracked in git deliberately - see docs/DEPLOYMENTS.md for why (this exists specifically so a stale .env.production on the VPS can never silently override which deployment the frontend reads from after a git pull). Contains ONLY public contract addresses, chain id, and deployment block - never secrets, never a database URL, never a signer key. Edit this file (and only this file) to point the frontend at a different deployment; no other source file should ever hardcode a contract address.",
-
   "chainId": 4663,
-
-  "deploymentBlock": 61564258,
-
+  "deploymentBlock": 67501280,
   "contracts": {
-    "tickerRegistry": "0xE631ed6E9E6FEAce145a0ab01cbd2BB947a4a2B2",
-    "tickerNFT": "0x9fbe11934c968298e2CaA76F738C8e8f81378b35",
-    "eligibilityRegistry": "0xeC6772973F0Bb73557A02361B7749F4063812E21",
-    "roundManager": "0x6396892Ea85D12b14272E584552e213147a3AAf6",
-    "rewardVault": "0xd2A133004D932404CE159AAd4E900501673C5Dc2"
+    "tickerRegistry": "0xb2026829151d1f4E1B35a4A7F9DA6afCFa3351C3",
+    "tickerNFT": "0x1B94e05BF4e702e85A600D7A5159Db8Db969E8EE",
+    "eligibilityRegistry": "0x82138f1ACD6e4aF3eF31C6ab299F4a8289EC83c1",
+    "roundManager": "0x44eaD0c765784670d934824f9D9c9E1a5Cf707c3",
+    "rewardVault": "0x19a0Eb73D83246872C43E3d713CE143DeB90CE91"
   },
-
   "$notReadByFrontend": {
-    "$comment": "Recorded for operational completeness and for scripts/verify-deployment.sh's own cross-contract/cross-chain checks. Never read by the Next.js app itself - see POST_DEPLOY_HANDOFF.md for exactly which five addresses (plus chainId/deploymentBlock) the frontend actually uses.",
-    "chainlinkRandomnessProvider": "0x4bB627192D56091f6ac0E17c179d608bf3eDDA0c",
+    "$comment": "Recorded for operational completeness. These values are not read by the Next.js frontend itself.",
+    "chainlinkRandomnessProvider": "0xA15142791Cb55fde2CD555bCcCb2Cbfb65550d24",
     "arbitrumVrfWrapper": "0x476d0e97dD7EA31e07D2362470CEF18B5fe394d8",
     "arbitrumVrfSubscriptionId": "83568090110973637554258631175012043155383488095251779152218551458964868806531",
-    "arbitrumVrfKeyHash": "0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409"
+    "arbitrumVrfKeyHash": "0x8472ba59cf7134dfe321f4d61a430c4857e8b19cdd5230b09952a92671c24409",
+    "arbitrumVrfCoordinator": "0x3C0Ca683b403E37668AE3DC4FB62F4B29B6f7a3e"
   },
-
   "$verification": {
-    "$comment": "Independently verified on-chain via scripts/verify-deployment.sh, run by the operator against real RPC access to both chains (this repository's own preparation environment has no such access - see docs/DEPLOYMENTS.md). Every check passed: chain ids on both RPCs, code presence at all six addresses across both chains, every Robinhood-side cross-contract getter (TickerRegistry.eligibilityRegistry/.tickerNFT/.winnerPot, TickerNFT.tickerRegistry, RoundManager.engine/.randomnessProvider/.rewardVault, RewardVault.roundManager, EligibilityRegistry.roundManager, ChainlinkRandomnessProvider.roundManager/.wrapperOnArbitrum), the cross-chain VRFWrapperOnArbitrum.providerOnRobinhoodChain/.subscriptionId/.keyHash checks, and deploymentBlock itself - resolved and confirmed from the real TickerRegistry deployment transaction's own receipt (status=success, contractAddress matches this file's tickerRegistry exactly, blockNumber matches the operator's independently-supplied EXPECTED_DEPLOYMENT_BLOCK exactly), never merely accepted from a claimed value.",
-    "verifiedAt": "2026-09-14",
-    "verifiedBy": "operator, via scripts/verify-deployment.sh against live Robinhood Chain and Arbitrum One RPC endpoints",
-    "verifiedDeploymentTxHash": "0x9e32d45c18e8828f60622174112d1bf7dc5ba20cafdad9be4a82ae3e105eaa32",
-    "verifierScriptCommit": "0d1ae78d2cfdadc6d28de4c26e75b6d57274d859"
+    "$comment": "V2 deployed and verified incrementally against live Robinhood Chain and Arbitrum One RPCs. Core wiring, cross-chain provider/wrapper wiring, VRF subscription consumer membership, provider funding and a non-persistent requestRandomness simulation were checked before switching this manifest to V2.",
+    "verifiedAt": "2026-09-20",
+    "verifiedBy": "operator via staged live RPC checks",
+    "verifiedDeploymentTxHash": "0x1577c356e452c21f3c14cb0cf941f67ef1451c500f6d1c1e014aa251730b4e28",
+    "sourceCommit": "b14b79aec6e22a3b91b890fc4a0ce9bca7d2283d",
+    "randomnessCutoverTxHash": "0x12b6f90720a2463d9dba16c6c52f0d1651b5347f47d3d9bf91dd62f784563d2a",
+    "providerFundingTxHash": "0x32bdc8a0fb10e45393d5d64b9dd04007a6c3ec30bb03fb2b422198c842501ec1"
   }
 }

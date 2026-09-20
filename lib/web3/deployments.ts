@@ -56,6 +56,19 @@ export const FROZEN_CANARY_V1_DEPLOYMENT: DeploymentIdentity = {
 };
 
 /**
+ * The V2 deployment, frozen to the real production registry deployed on
+ * Robinhood Chain. Like canary-v1, this must never follow the active
+ * manifest dynamically: the V2 TickerNFT uses the immutable
+ * /api/ticker-metadata/v2/ base URI, so deploymentId "v2" must always
+ * resolve to this exact chain + registry even after a future deployment
+ * becomes active.
+ */
+export const FROZEN_V2_DEPLOYMENT: DeploymentIdentity = {
+  chainId: 4663,
+  tickerRegistryAddress: "0xb2026829151d1f4E1B35a4A7F9DA6afCFa3351C3",
+};
+
+/**
  * Fixed, server-side mapping from a short, URL-safe deploymentId to its
  * real deployment identity. This is the ONLY way a deploymentId in a URL
  * path (e.g. /api/ticker-metadata/canary-v1/1) ever resolves to a real
@@ -73,20 +86,15 @@ export const FROZEN_CANARY_V1_DEPLOYMENT: DeploymentIdentity = {
  * deployment (see FROZEN_CANARY_V1_DEPLOYMENT's own docs for why this
  * matters and what used to be wrong here).
  *
- * "v2" is deliberately NOT yet a second hardcoded address: V2's contracts
- * are not deployed (this repository's V2 work is source+tests only, per
- * every V2 task's own explicit instruction not to deploy), so there is no
- * real address to freeze yet. It resolves through getActiveDeployment()
- * for now, the same way "canary-v1" originally (and, in retrospect,
- * incorrectly) did - once V2 is actually deployed and its own addresses are
- * tracked in the manifest, "v2" should be frozen the same way "canary-v1"
- * is frozen above, before any LATER deployment might ever make it stop
- * being the active one. Never reuse "v2" as a deploymentId for anything
- * else once a real V2 TickerNFT's base URI has been minted with it.
+ * "v2" now resolves to FROZEN_V2_DEPLOYMENT above. V2 has been deployed,
+ * verified and assigned its permanent deployment identity, so this resolver
+ * must never again depend on getActiveDeployment(). A future V3 or other
+ * deployment may replace V2 as the active manifest without changing what
+ * /api/ticker-metadata/v2/... means.
  */
 const KNOWN_DEPLOYMENTS: Record<string, () => DeploymentIdentity | null> = {
   "canary-v1": () => FROZEN_CANARY_V1_DEPLOYMENT,
-  v2: () => getActiveDeployment(),
+  v2: () => FROZEN_V2_DEPLOYMENT,
 };
 
 export function getKnownDeploymentById(deploymentId: string): DeploymentIdentity | null {
