@@ -14,6 +14,7 @@ import {
   REQUIRED_STREAK_SECONDS,
 } from "@/lib/constants";
 import type { EligibilityStage, TokenSummary } from "@/lib/types";
+import { tokenProfileStore, type TokenProfile } from "@/lib/metadata/TokenProfileStore";
 
 /** Every launched token's real on-chain state, discovered from
  * TickerRegistry's `Launched` events (per section 4: no indexer/subgraph -
@@ -108,9 +109,11 @@ export function useTokenDiscovery() {
           const summary: TokenSummary = {
             tokenId: Number(tokenId),
             ticker,
-            name: ticker, // MemeToken.name() mirrors the ticker at launch time; see final report's
-                          // metadata note for why a separate display name isn't available yet
-            imageUrl: null, // no on-chain image metadata - see metadata persistence note
+            name: ticker, // onchain fallback only - overwritten below with the persisted
+                          // displayName when one exists (see the getMany enrichment step
+                          // at the end of this queryFn)
+            imageUrl: null, // onchain fallback only - overwritten below with the persisted
+                             // imageUrl when one exists (same enrichment step)
             marketAddress: market,
             tokenAddress: token,
             creator: sender,
@@ -129,7 +132,18 @@ export function useTokenDiscovery() {
         })
       );
 
-      return tokens.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      // Enrich with persisted off-chain profile data (imageUrl, a real
+      // display name) in exactly ONE additional round trip for the whole
+      // discovered set - never one request per token. A profile-fetch
+      // failure (DB down, network error) never breaks discovery itself:
+      // tokenProfileStore.getMany already swallows its own errors and
+      // returns an empty map, so every token simply keeps its onchain-only
+      // fallback (imageUrl: null, name: ticker) in that case, exactly as
+      // it did before this enrichment step existed.
+      const profiles = await tokenProfileStore.getMany(tokens.map((t) => t.tokenId));
+      const enriched = enrichTokensWithProfiles(tokens, profiles);
+
+      return enriched.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     },
   });
 }
@@ -152,4 +166,24 @@ function deriveEligibilityStage(params: {
   }
 
   return "building"; // reserve currently below MIN_RESERVE_THRESHOLD, no streak running
+}
+
+/** The actual merge decision for enriching discovered on-chain tokens with
+ *  their persisted off-chain profile data - extracted as a pure function,
+ *  the same way isStillResolvingTokenExistence is in useTokenData.ts,
+ *  specifically so this decision is directly testable without mocking
+ *  react-query/wagmi/fetch. A tokenId with no entry in `profiles` (no
+ *  saved profile, or the whole batch fetch failed and returned an empty
+ *  map) keeps its onchain-only fallback fields completely unchanged -
+ *  every field on `token` other than imageUrl/name is always passed
+ *  through untouched, never recomputed here. */
+export function enrichTokensWithProfiles(tokens: TokenSummary[], profiles: Map<number, TokenProfile>): TokenSummary[] {
+  return tokens.map((t) => {
+    const profile = profiles.get(t.tokenId);
+    return {
+      ...t,
+      imageUrl: profile?.imageUrl ?? t.imageUrl,
+      name: profile?.displayName ?? t.name,
+    };
+  });
 }

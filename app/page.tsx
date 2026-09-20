@@ -79,6 +79,7 @@ export default function LandingPage() {
     .map((t) => ({
       ticker: t.ticker,
       name: t.name,
+      imageUrl: t.imageUrl,
       priceEth: `${formatEthPrecise(t.priceEth)} ETH`,
       change24h: t.change24hPct,
       curvePct: t.curveProgressPct,

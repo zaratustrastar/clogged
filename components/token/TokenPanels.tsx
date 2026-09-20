@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { prizeSkin } from "@/components/machine/Claw";
+import { TokenAvatar } from "@/components/machine/TokenAvatar";
 
 /** Token header. PATCH P1-1 APPLIED: the OpenSea link uses the real TickerNFT contract
  *  address (the current TokenHeader passes the literal string "ticker-nft", producing a
@@ -7,6 +7,7 @@ import { prizeSkin } from "@/components/machine/Claw";
 export function TokenHeader({
   ticker,
   name,
+  imageUrl,
   creator,
   ageLabel,
   qualified,
@@ -15,6 +16,14 @@ export function TokenHeader({
 }: {
   ticker: string;
   name: string;
+  /** The persisted off-chain TokenProfile's real uploaded image, if any -
+   *  see lib/hooks/useTokenDiscovery.ts's own enrichment step, which is
+   *  what makes this available on TokenDetail (t.imageUrl) with no extra
+   *  fetch at this call site. Renders via TokenAvatar, which falls back to
+   *  the existing deterministic prizeSkin(ticker) placeholder whenever this
+   *  is null, undefined, or fails to load - never a broken-image icon and
+   *  never a behavior change for a token with no uploaded image. */
+  imageUrl?: string | null;
   creator: string;
   ageLabel: string;
   qualified: boolean;
@@ -23,7 +32,7 @@ export function TokenHeader({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-4 border border-edge-soft bg-gradient-to-b from-chassis-600 to-chassis-800 px-5 py-[18px]">
-      <span aria-hidden className="h-[62px] w-[62px] flex-none rounded-2xl shadow-prize" style={{ background: prizeSkin(ticker) }} />
+      <TokenAvatar ticker={ticker} imageUrl={imageUrl} className="h-[62px] w-[62px] flex-none rounded-2xl shadow-prize" />
       <div className="min-w-0 flex-[1_1_200px]">
         <div className="flex flex-wrap items-baseline gap-2.5">
           <h1 className="m-0 font-display text-[30px] tracking-[-0.02em]">{ticker}</h1>

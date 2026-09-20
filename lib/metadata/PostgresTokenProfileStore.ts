@@ -6,6 +6,7 @@ import type { TokenProfile, TokenProfileStore } from "@/lib/metadata/TokenProfil
 /**
  * Real, server-only Postgres implementation of TokenProfileStore. Only ever
  * reached from API routes (app/api/token-profile/route.ts,
+ * app/api/token-profiles/route.ts (the batch counterpart, see getMany below),
  * app/api/ticker-metadata/[...slug]/route.ts,
  * app/api/ticker-metadata/[deploymentId]/[tokenId]/route.ts) - never
  * imported from client components, which use the fetch-based client in
@@ -50,6 +51,39 @@ export class PostgresTokenProfileStore implements TokenProfileStore {
       telegramUrl: row.telegram_url ?? undefined,
       websiteUrl: row.website_url ?? undefined,
     };
+  }
+
+  /** Batch counterpart to get() - one query for a whole set of tokenIds
+   *  within a single deployment, so enriching a full discovered token list
+   *  (see lib/hooks/useTokenDiscovery.ts) costs one HTTP round trip and one
+   *  SQL query total, not one of each per token. `token_id = ANY($3)`
+   *  against the table's own composite primary key
+   *  (chain_id, ticker_registry_address, token_id - see migration 002)
+   *  is answered directly from that index; no new index or migration is
+   *  needed for this to be efficient at any realistic token count. */
+  async getMany(tokenIds: number[], deployment?: DeploymentIdentity): Promise<Map<number, TokenProfile>> {
+    const result = new Map<number, TokenProfile>();
+    if (tokenIds.length === 0) return result;
+    if (!isDatabaseConfigured()) return result;
+    const target = deployment ?? getActiveDeployment();
+    if (!target) return result;
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT token_id, display_name, image_url, x_url, telegram_url, website_url
+       FROM token_profiles WHERE chain_id = $1 AND ticker_registry_address = $2 AND token_id = ANY($3)`,
+      [target.chainId, target.tickerRegistryAddress.toLowerCase(), tokenIds]
+    );
+    for (const row of rows) {
+      result.set(Number(row.token_id), {
+        tokenId: Number(row.token_id),
+        displayName: row.display_name ?? undefined,
+        imageUrl: row.image_url ?? undefined,
+        xUrl: row.x_url ?? undefined,
+        telegramUrl: row.telegram_url ?? undefined,
+        websiteUrl: row.website_url ?? undefined,
+      });
+    }
+    return result;
   }
 
   async set(profile: TokenProfile, deployment?: DeploymentIdentity): Promise<{ persisted: boolean }> {

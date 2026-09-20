@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { prizeSkin } from "@/components/machine/Claw";
+import { TokenAvatar } from "@/components/machine/TokenAvatar";
 import { NoSignal, EmptyChute } from "@/components/machine/States";
 
 export type ExploreRow = {
   ticker: string;          // with leading $
   name: string;
+  imageUrl?: string | null;
   priceEth: string;        // pre-formatted, unit included
   change1h: number | null;
   change24h: number | null;
@@ -75,7 +76,7 @@ export function ExploreTable({
         {rows.map((r) => (
           <Link key={r.ticker} href={href(r.ticker)} className={`${COLS} bg-edge-inner no-underline hover:bg-edge-hard`}>
             <span className="flex min-w-0 items-center gap-3 bg-chassis-800 px-3.5 py-3.5">
-              <span aria-hidden className="h-[30px] w-[30px] flex-none rounded-lg" style={{ background: prizeSkin(r.ticker) }} />
+              <TokenAvatar ticker={r.ticker} imageUrl={r.imageUrl} className="h-[30px] w-[30px] flex-none rounded-lg" />
               <span className="min-w-0">
                 <span className="clog-fig block text-[13.5px] text-ink-100">{r.ticker}</span>
                 <span className="block truncate text-[11.5px] text-ink-500">{r.name}</span>
@@ -102,7 +103,7 @@ export function ExploreTable({
       <div className="flex flex-col gap-2 md:hidden">
         {rows.map((r) => (
           <Link key={r.ticker} href={href(r.ticker)} className="flex items-center gap-3 border border-edge-soft bg-chassis-800 p-3.5 no-underline">
-            <span aria-hidden className="h-11 w-11 flex-none rounded-xl" style={{ background: prizeSkin(r.ticker) }} />
+            <TokenAvatar ticker={r.ticker} imageUrl={r.imageUrl} className="h-11 w-11 flex-none rounded-xl" />
             <span className="flex min-w-0 flex-1 flex-col gap-1.5">
               <span className="flex items-baseline justify-between gap-2.5">
                 <span className="clog-fig text-sm text-ink-100">{r.ticker}</span>
