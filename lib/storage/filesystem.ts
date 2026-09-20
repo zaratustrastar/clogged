@@ -91,3 +91,37 @@ export async function uploadImage(buffer: Buffer, mimeType: string): Promise<Upl
   const base = process.env.UPLOAD_PUBLIC_BASE_URL!.replace(/\/+$/, "");
   return { ok: true, url: `${base}/${filename}`, key: filename };
 }
+
+// The exact shape a randomUUID()-based filename always takes: 32 hex
+// digits in 8-4-4-4-12 groups. Not validating UUID v4's own version/variant
+// nibbles specifically - the point of this pattern is rejecting anything
+// that ISN'T this general shape (an external URL, a data: URI, a
+// hand-crafted path), not certifying RFC 4122 compliance.
+const UPLOAD_FILENAME_PATTERN = new RegExp(
+  `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.(${Object.values(ALLOWED_MIME_TYPES).join("|")})$`
+);
+
+/**
+ * Whether `url` is EXACTLY a URL this system's own uploadImage() could have
+ * produced - the configured UPLOAD_PUBLIC_BASE_URL, followed by a real
+ * uploaded filename's own shape, nothing else. Used to gate what
+ * POST /api/token-profile will accept as an imageUrl: an arbitrary
+ * external URL, a `data:`/`javascript:`/protocol-relative URL, or any
+ * other string can never match this - the required exact prefix alone
+ * rules all of them out structurally, not via a blocklist of dangerous
+ * schemes that would need to be kept exhaustive by hand.
+ *
+ * Read directly from process.env here (not cached at module load) so a
+ * changed UPLOAD_PUBLIC_BASE_URL takes effect without a restart being the
+ * only way it's picked up in a given process's lifetime - consistent with
+ * isFilesystemStorageConfigured() and uploadImage() above, which do the
+ * same.
+ */
+export function isOwnUploadedImageUrl(url: string): boolean {
+  const base = process.env.UPLOAD_PUBLIC_BASE_URL;
+  if (!base) return false; // nothing could ever be a valid uploaded URL if storage isn't configured
+  const normalizedBase = base.replace(/\/+$/, "");
+  if (!url.startsWith(`${normalizedBase}/`)) return false;
+  const remainder = url.slice(normalizedBase.length + 1);
+  return UPLOAD_FILENAME_PATTERN.test(remainder);
+}

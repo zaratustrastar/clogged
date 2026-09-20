@@ -6,8 +6,18 @@ import { TickerSlot, OptionalMeta, type Availability } from "@/components/launch
 import { LaunchDeck, type LaunchPhase } from "@/components/launch/LaunchDeck";
 import { txMotionState } from "@/components/machine/motion";
 import { useRef } from "react";
+import { useAccount, useSignTypedData } from "wagmi";
+import type { Hex } from "viem";
 import { useLaunchToken, useTickerAvailability } from "@/lib/hooks/useProtocolActions";
 import { tokenProfileStore } from "@/lib/metadata/TokenProfileStore";
+import {
+  buildUpdateTokenProfileDomain,
+  buildUpdateTokenProfileMessage,
+  UPDATE_TOKEN_PROFILE_TYPES,
+  MAX_SIGNATURE_LIFETIME_SECONDS,
+} from "@/lib/metadata/tokenProfileAuth";
+import { addresses } from "@/lib/web3/addresses";
+import { env } from "@/lib/web3/env";
 import { useNow } from "@/lib/hooks/useNow";
 import { formatCountdown } from "@/lib/format";
 
@@ -203,19 +213,55 @@ export default function LaunchPage() {
   async function saveProfile(tokenId: number) {
     setProfileSaveStatus("saving");
     const fd = formRef.current ? new FormData(formRef.current) : null;
-    const { persisted } = await tokenProfileStore.set({
+    const profileFields = {
       tokenId,
       displayName: name || undefined,
       imageUrl: imageRemoteUrl ?? undefined,
       xUrl: (fd?.get("x") as string) || undefined,
       telegramUrl: (fd?.get("telegram") as string) || undefined,
       websiteUrl: (fd?.get("website") as string) || undefined,
-    });
+    };
+
+    // The server independently reads TickerNFT.ownerOf(tokenId) and
+    // requires the signer recovered from the signature below to match it
+    // exactly - nothing about the client's own connected address is ever
+    // trusted directly, only what a real signature can prove. Without a
+    // connected wallet there is no way to produce that signature at all.
+    if (!address || !env.chainId || !addresses.tickerNFT) {
+      setProfileSaveStatus("failed");
+      return;
+    }
+
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiresAt = issuedAt + MAX_SIGNATURE_LIFETIME_SECONDS;
+
+    let signature: Hex;
+    try {
+      // Signs the EXACT metadata payload above, not merely tokenId+time -
+      // see lib/metadata/tokenProfileAuth.ts's own docs for why. Rejecting
+      // the wallet's signature prompt (or any other signing error) is a
+      // profile-save failure only: it never touches, and never retries,
+      // the reveal transaction that has already irreversibly succeeded by
+      // the time this ever runs.
+      signature = await signTypedDataAsync({
+        domain: buildUpdateTokenProfileDomain({ chainId: Number(env.chainId), verifyingContract: addresses.tickerNFT }),
+        types: UPDATE_TOKEN_PROFILE_TYPES,
+        primaryType: "UpdateTokenProfile",
+        message: buildUpdateTokenProfileMessage({ ...profileFields, issuedAt, expiresAt }),
+      });
+    } catch {
+      setProfileSaveStatus("failed");
+      return;
+    }
+
+    const { persisted } = await tokenProfileStore.set({ ...profileFields, issuedAt, expiresAt, signature });
     setProfileSaveStatus(persisted ? "saved" : "failed");
   }
 
   const availability = useTickerAvailability(ticker);
   const launch = useLaunchToken();
+  const { address } = useAccount();
+  const { signTypedDataAsync } = useSignTypedData();
 
   const phase: LaunchPhase = (launch.phase ?? "idle") as LaunchPhase;
 

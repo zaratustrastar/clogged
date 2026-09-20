@@ -111,3 +111,47 @@ describe("filesystem storage adapter", () => {
     }
   });
 });
+
+describe("isOwnUploadedImageUrl - gates POST /api/token-profile's imageUrl field", () => {
+  it("accepts a real URL uploadImage() itself just produced - round-trip, not a hand-built lookalike", async () => {
+    const { uploadImage, isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    const result = await uploadImage(Buffer.from("bytes"), "image/png");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(isOwnUploadedImageUrl(result.url)).toBe(true);
+    }
+  });
+
+  it("accepts a well-formed URL matching the real pattern for every allowed extension", async () => {
+    const { isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    for (const ext of ["png", "jpg", "webp", "gif"]) {
+      expect(isOwnUploadedImageUrl(`https://clog.run/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.${ext}`)).toBe(true);
+    }
+  });
+
+  it("rejects an arbitrary external URL, even one that starts with the right domain elsewhere in the string", async () => {
+    const { isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    expect(isOwnUploadedImageUrl("https://evil.example.com/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png")).toBe(false);
+    expect(isOwnUploadedImageUrl("https://clog.run.evil.com/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png")).toBe(false);
+  });
+
+  it("rejects data:, javascript:, and protocol-relative URLs", async () => {
+    const { isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    expect(isOwnUploadedImageUrl("data:image/png;base64,aGVsbG8=")).toBe(false);
+    expect(isOwnUploadedImageUrl("javascript:alert(1)")).toBe(false);
+    expect(isOwnUploadedImageUrl("//clog.run/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png")).toBe(false);
+  });
+
+  it("rejects the right prefix with a malformed filename (not a real uploaded file's own shape)", async () => {
+    const { isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    expect(isOwnUploadedImageUrl("https://clog.run/uploads/not-a-real-uuid.png")).toBe(false);
+    expect(isOwnUploadedImageUrl("https://clog.run/uploads/../../etc/passwd")).toBe(false);
+    expect(isOwnUploadedImageUrl("https://clog.run/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.exe")).toBe(false);
+  });
+
+  it("returns false for any URL when storage isn't configured - nothing could ever be a valid uploaded URL", async () => {
+    delete process.env.UPLOAD_PUBLIC_BASE_URL;
+    const { isOwnUploadedImageUrl } = await import("@/lib/storage/filesystem");
+    expect(isOwnUploadedImageUrl("https://clog.run/uploads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png")).toBe(false);
+  });
+});
