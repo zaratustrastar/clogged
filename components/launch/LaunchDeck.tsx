@@ -48,6 +48,7 @@ export function LaunchDeck({
   explorerUrl,
   revealUnlocksIn,
   disabled,
+  blockedReason,
   onPrimary,
   tokenHref,
 }: {
@@ -59,6 +60,11 @@ export function LaunchDeck({
   /** pre-formatted mm:ss from the protocol's own deadline, or null when unlocked */
   revealUnlocksIn?: string | null;
   disabled?: boolean;
+  /** Set when `disabled` is true for a reason the person can act on themselves
+   *  right now (e.g. an image upload still in flight or failed) - shown as its
+   *  own small notice so a disabled REVEAL & MINT button never looks broken or
+   *  unexplained. Distinct from errorMessage: this is not a chain/tx error. */
+  blockedReason?: string | null;
   onPrimary: () => void;
   tokenHref?: string;
 }) {
@@ -77,6 +83,12 @@ export function LaunchDeck({
 
       {errorMessage ? (
         <p className={`m-0 break-words font-mono text-[11.5px] ${TONE_CLASS.bad}`}>{errorMessage}</p>
+      ) : null}
+
+      {blockedReason ? (
+        <div className="flex items-center gap-2.5 border border-amber/35 bg-amber/[0.06] p-3">
+          <span className={`font-mono text-label ${TONE_CLASS.wait}`}>{blockedReason}</span>
+        </div>
       ) : null}
 
       {txHash ? (
