@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Cabinet } from "@/components/machine/Cabinet";
 import { TickerSlot, OptionalMeta, type Availability } from "@/components/launch/TickerSlot";
 import { LaunchDeck, type LaunchPhase } from "@/components/launch/LaunchDeck";
@@ -67,11 +67,152 @@ export default function LaunchPage() {
   // values are read via FormData at reveal time instead - this preserves
   // the existing "stored off-chain after the token is live" behavior
   // without adding controlled state to a presentational component the
-  // task asks not to rewrite. The image dropzone in OptionalMeta has no
-  // actual <input type="file"> at all (a static placeholder div) - out of
-  // scope to build from scratch here; flagged in the PR description as a
-  // known gap, not silently dropped.
+  // task asks not to rewrite. The image field IS controlled state (below)
+  // rather than FormData-read, since a file upload needs to happen (and
+  // be able to fail, and be retried) well before reveal, not merely be
+  // read off at that moment the way a plain text field can be.
   const formRef = useRef<HTMLFormElement>(null);
+
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [imageRemoteUrl, setImageRemoteUrl] = useState<string | null>(null);
+  const [imageStatus, setImageStatus] = useState<"idle" | "uploading" | "error">("idle");
+  const [imageError, setImageError] = useState<string | null>(null);
+  // A ref, not just the state above, specifically so the unmount-only
+  // cleanup effect below can read the CURRENT url without needing to
+  // depend on (and therefore re-run on every change of) imagePreviewUrl -
+  // an effect with [] deps only ever closes over the state's value from
+  // the initial render otherwise, which would always be null.
+  const imagePreviewUrlRef = useRef<string | null>(null);
+
+  // Race-safety for the upload itself: selecting a new file (or pressing
+  // CLEAR) bumps the generation counter and aborts whatever request was
+  // still in flight. Every state-updating step inside handleImageFile
+  // re-checks its OWN captured generation against the current one before
+  // touching state - so a slow, now-superseded upload (image A, then
+  // quickly image B; or CLEAR pressed mid-upload) can never overwrite what
+  // the person has since done, even though its own network request is
+  // still running and will still eventually resolve or reject.
+  const uploadGenerationRef = useRef(0);
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    imagePreviewUrlRef.current = imagePreviewUrl;
+  }, [imagePreviewUrl]);
+
+  // Object URLs created via URL.createObjectURL are never freed by the
+  // browser automatically - revoke whichever one is current when the page
+  // itself unmounts (the individual replace/clear paths below already
+  // revoke their own prior URL as they go), and abort any still-running
+  // upload so it can't touch state after the component is gone.
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrlRef.current) URL.revokeObjectURL(imagePreviewUrlRef.current);
+      uploadAbortControllerRef.current?.abort();
+    };
+  }, []);
+
+  // The image is "ready" for reveal only once a selected file has a real,
+  // successfully-uploaded remote URL. Covers both "still uploading" and
+  // "upload failed" uniformly - either way, imageRemoteUrl is still null,
+  // and reveal must not proceed with a selected-but-unattached image
+  // (fix #1/#2: never silently mint without the image the person picked,
+  // and never let them believe a still-uploading image will be there).
+  // Clearing the image (imageFile back to null) removes this block
+  // entirely - an intentionally-skipped image was never promised to
+  // anyone.
+  const imageBlocksReveal = imageFile !== null && imageRemoteUrl === null;
+
+  async function handleImageFile(file: File) {
+    // Client-side pre-check mirrors the real, authoritative server-side
+    // validation (lib/storage/filesystem.ts's own ALLOWED_MIME_TYPES/
+    // MAX_FILE_SIZE_BYTES) - this is only for immediate feedback before a
+    // network round trip; the server's own check is what actually decides
+    // whether the file is accepted, never bypassed by this one.
+    const allowed = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    if (!allowed.includes(file.type)) {
+      setImageStatus("error");
+      setImageError("Unsupported file type - use PNG, JPG, WEBP, or GIF.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setImageStatus("error");
+      setImageError("Image too large - max 5 MB.");
+      return;
+    }
+
+    // Supersede whatever upload (if any) was still running, then claim
+    // this generation as the new authoritative one.
+    uploadAbortControllerRef.current?.abort();
+    const myGeneration = ++uploadGenerationRef.current;
+    const controller = new AbortController();
+    uploadAbortControllerRef.current = controller;
+
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    setImageFile(file);
+    setImagePreviewUrl(URL.createObjectURL(file));
+    setImageRemoteUrl(null);
+    setImageStatus("uploading");
+    setImageError(null);
+
+    try {
+      const body = new FormData();
+      body.set("image", file);
+      const res = await fetch("/api/upload-image", { method: "POST", body, signal: controller.signal });
+      if (uploadGenerationRef.current !== myGeneration) return; // superseded while the request was in flight
+      const data = await res.json();
+      if (uploadGenerationRef.current !== myGeneration) return; // superseded between the two awaits
+      if (!res.ok) {
+        setImageStatus("error");
+        setImageError(typeof data?.error === "string" ? data.error : "Upload failed - try again.");
+        return;
+      }
+      setImageRemoteUrl(data.url as string);
+      setImageStatus("idle");
+    } catch {
+      // Includes a real AbortError from the controller above - in that
+      // case the generation check has already moved on too, so this
+      // branch only ever surfaces a genuine network/upload failure for
+      // the CURRENT selection, never a stale one.
+      if (uploadGenerationRef.current !== myGeneration) return;
+      setImageStatus("error");
+      setImageError("Upload failed - check your connection and try again.");
+    }
+  }
+
+  function handleImageClear() {
+    uploadAbortControllerRef.current?.abort();
+    uploadGenerationRef.current++; // invalidate any upload still in flight - it must never restore imageRemoteUrl after this
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    setImageFile(null);
+    setImagePreviewUrl(null);
+    setImageRemoteUrl(null);
+    setImageStatus("idle");
+    setImageError(null);
+  }
+
+  // Off-chain profile persistence (name/image/socials) is entirely separate
+  // from the reveal transaction itself, which has already irreversibly
+  // succeeded by the time this ever runs - a failure here must never be
+  // confused with, or trigger any retry of, the mint. Reusable so the same
+  // call can be made once automatically right after reveal, and again,
+  // as many times as needed, from the "retry saving details" control below
+  // without resending any transaction.
+  const [profileSaveStatus, setProfileSaveStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+
+  async function saveProfile(tokenId: number) {
+    setProfileSaveStatus("saving");
+    const fd = formRef.current ? new FormData(formRef.current) : null;
+    const { persisted } = await tokenProfileStore.set({
+      tokenId,
+      displayName: name || undefined,
+      imageUrl: imageRemoteUrl ?? undefined,
+      xUrl: (fd?.get("x") as string) || undefined,
+      telegramUrl: (fd?.get("telegram") as string) || undefined,
+      websiteUrl: (fd?.get("website") as string) || undefined,
+    });
+    setProfileSaveStatus(persisted ? "saved" : "failed");
+  }
 
   const availability = useTickerAvailability(ticker);
   const launch = useLaunchToken();
@@ -137,7 +278,15 @@ export default function LaunchPage() {
               onName={setName}
               availability={avail}
             />
-            <OptionalMeta open={optionalOpen} onToggle={() => setOptionalOpen((v) => !v)} />
+            <OptionalMeta
+              open={optionalOpen}
+              onToggle={() => setOptionalOpen((v) => !v)}
+              imagePreviewUrl={imagePreviewUrl}
+              imageStatus={imageStatus}
+              imageError={imageError}
+              onImageFile={handleImageFile}
+              onImageClear={handleImageClear}
+            />
           </div>
 
           <LaunchDeck
@@ -146,26 +295,50 @@ export default function LaunchPage() {
             txHash={null}
             explorerUrl={null}
             revealUnlocksIn={revealCountdown}
-            disabled={!canSubmit && phase === "idle"}
+            disabled={(!canSubmit && phase === "idle") || (phase === "waiting" && imageBlocksReveal)}
+            blockedReason={
+              phase === "waiting" && imageBlocksReveal
+                ? imageStatus === "uploading"
+                  ? "Waiting for the image upload to finish before you can reveal."
+                  : "Selected image failed to upload - retry it or press CLEAR before you can reveal."
+                : null
+            }
             onPrimary={() => {
               if (phase === "idle" || phase === "error") {
                 launch.execute({ ticker });
               } else if (phase === "waiting") {
+                if (imageBlocksReveal) return; // belt and suspenders - the button is already disabled for this
                 launch.reveal().then((result) => {
                   if (!result) return; // reveal itself already surfaced the error via launch.error
-                  const fd = formRef.current ? new FormData(formRef.current) : null;
-                  tokenProfileStore.set({
-                    tokenId: result.tokenId,
-                    displayName: name || undefined,
-                    xUrl: (fd?.get("x") as string) || undefined,
-                    telegramUrl: (fd?.get("telegram") as string) || undefined,
-                    websiteUrl: (fd?.get("website") as string) || undefined,
-                  });
+                  saveProfile(result.tokenId);
                 });
               }
             }}
             tokenHref={phase === "live" ? `/token/${ticker}` : undefined}
           />
+
+          {phase === "live" && (profileSaveStatus === "failed" || profileSaveStatus === "saving") ? (
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 border border-amber/35 bg-amber/[0.06] p-3">
+              <p className="m-0 text-[12.5px] leading-[1.5] text-ink-100">
+                {profileSaveStatus === "saving"
+                  ? "Saving token details…"
+                  : "Your token is live, but the name/image/socials you set did not save. This never touches the chain — safe to retry."}
+              </p>
+              {profileSaveStatus === "saving" ? (
+                <span className="whitespace-nowrap border border-edge-hard bg-chassis-800 px-3 py-2 font-mono text-label text-ink-500 opacity-50">
+                  SAVING…
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => launch.tokenId != null && saveProfile(launch.tokenId)}
+                  className="whitespace-nowrap border border-edge-hard bg-chassis-800 px-3 py-2 font-mono text-label text-amber"
+                >
+                  RETRY SAVING DETAILS
+                </button>
+              )}
+            </div>
+          ) : null}
         </Cabinet>
 
         <aside className="flex min-w-0 flex-col gap-3">
