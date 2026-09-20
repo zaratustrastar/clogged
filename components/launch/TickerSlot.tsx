@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import { StatusLamp } from "@/components/machine/PhysicalButton";
 
 export type Availability =
@@ -68,7 +69,30 @@ export function TickerSlot({
 
 /** Optional metadata, collapsed out of the critical path so the primary action is
  *  never below six fields. Skipping these does not delay the launch. */
-export function OptionalMeta({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+export function OptionalMeta({
+  open,
+  onToggle,
+  imagePreviewUrl,
+  imageStatus,
+  imageError,
+  onImageFile,
+  onImageClear,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  imagePreviewUrl: string | null;
+  imageStatus: "idle" | "uploading" | "error";
+  imageError: string | null;
+  onImageFile: (file: File) => void;
+  onImageClear: () => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (file) onImageFile(file);
+  }
+
   return (
     <>
       <button
@@ -80,10 +104,60 @@ export function OptionalMeta({ open, onToggle }: { open: boolean; onToggle: () =
       </button>
       {open ? (
         <div className="flex flex-col gap-2.5 border-l border-edge-hair pl-3.5">
-          <div className="flex items-center gap-2.5 border border-dashed border-edge-hard bg-chassis-800 p-3">
-            <span aria-hidden className="h-[38px] w-[38px] flex-none rounded-[10px] bg-prize-empty" />
-            <span className="font-mono text-[10.5px] text-ink-500">DROP PRIZE IMAGE · PNG/JPG · OPTIONAL</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            className="hidden"
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = ""; // allow re-selecting the same file after a clear/retry
+            }}
+          />
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              handleFiles(e.dataTransfer.files);
+            }}
+            className="flex cursor-pointer items-center gap-2.5 border border-dashed border-edge-hard bg-chassis-800 p-3"
+          >
+            {imagePreviewUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element -- a locally-selected file's own object URL, not a remote image Next's optimizer can operate on
+              <img src={imagePreviewUrl} alt="" className="h-[38px] w-[38px] flex-none rounded-[10px] object-cover" />
+            ) : (
+              <span aria-hidden className="h-[38px] w-[38px] flex-none rounded-[10px] bg-prize-empty" />
+            )}
+            <span className="font-mono text-[10.5px] text-ink-500">
+              {imageStatus === "uploading"
+                ? "UPLOADING…"
+                : imagePreviewUrl
+                  ? "IMAGE SELECTED · CLICK TO REPLACE"
+                  : "DROP PRIZE IMAGE · PNG/JPG/WEBP/GIF · OPTIONAL"}
+            </span>
+            {imagePreviewUrl && !(imageStatus === "uploading") ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onImageClear();
+                }}
+                className="ml-auto border-0 bg-transparent p-1 font-mono text-[10.5px] text-ink-600"
+              >
+                CLEAR
+              </button>
+            ) : null}
           </div>
+          {imageStatus === "error" && imageError ? <p className="m-0 text-[11.5px] text-bad">{imageError}</p> : null}
           {[
             { name: "x", ph: "x.com/handle" },
             { name: "telegram", ph: "t.me/channel" },
