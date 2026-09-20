@@ -1,14 +1,19 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { NextRequest } from "next/server";
-import { GET as GET_BATCH } from "@/app/api/token-profiles/route";
-import { POST } from "@/app/api/token-profile/route";
+import { POST as POST_BATCH } from "@/app/api/token-profiles/route";
+import { POST as POST_SINGLE, GET as GET_SINGLE } from "@/app/api/token-profile/route";
 import { getPool } from "@/lib/db/pool";
+import { MAX_TICKER_COUNT } from "@/lib/constants";
 
-function makeBatchRequest(tokenIds: string) {
-  return new NextRequest(`http://localhost/api/token-profiles?tokenIds=${tokenIds}`);
+function makeBatchRequest(body: unknown) {
+  return new NextRequest("http://localhost/api/token-profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
 }
 
-function makePostRequest(body: unknown) {
+function makeSinglePostRequest(body: unknown) {
   return new NextRequest("http://localhost/api/token-profile", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -19,47 +24,58 @@ function makePostRequest(body: unknown) {
 // A distinct tokenId range (920000+) from token-profile/route.test.ts's own
 // 910000+ range, so the two test files' real database writes can never
 // collide or interfere with each other's assertions.
-describe("app/api/token-profiles route (batch)", () => {
+describe("app/api/token-profiles route (batch, POST)", () => {
   afterAll(async () => {
     const pool = getPool();
     await pool.query("DELETE FROM token_profiles WHERE token_id >= 920000 AND token_id < 930000");
     await pool.end();
   });
 
-  it("GET with no tokenIds param returns 400", async () => {
-    const res = await GET_BATCH(new NextRequest("http://localhost/api/token-profiles"));
+  it("invalid JSON body returns 400, not a 500 crash", async () => {
+    const res = await POST_BATCH(makeBatchRequest("{not valid json"));
     expect(res.status).toBe(400);
   });
 
-  it("GET with an empty tokenIds param returns 400", async () => {
-    const res = await GET_BATCH(makeBatchRequest(""));
+  it("a body without a tokenIds array returns 400", async () => {
+    const res = await POST_BATCH(makeBatchRequest({ notTokenIds: [1, 2] }));
     expect(res.status).toBe(400);
   });
 
-  it("GET with a non-numeric id in the list returns 400", async () => {
-    const res = await GET_BATCH(makeBatchRequest("920001,not-a-number"));
+  it("an empty tokenIds array returns 400", async () => {
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: [] }));
     expect(res.status).toBe(400);
   });
 
-  it("GET with more than 500 ids returns 400", async () => {
-    const tooMany = Array.from({ length: 501 }, (_, i) => 920000 + i).join(",");
-    const res = await GET_BATCH(makeBatchRequest(tooMany));
+  it("a non-numeric id in the list returns 400", async () => {
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: [920001, "not-a-number"] }));
     expect(res.status).toBe(400);
   });
 
-  it("GET for tokenIds with no saved profiles returns an empty profiles array, never an error", async () => {
-    const res = await GET_BATCH(makeBatchRequest("920002,920003"));
+  it(`more than MAX_TICKER_COUNT (${MAX_TICKER_COUNT}) ids returns 400 - the real, contract-enforced ceiling, not the old artificial 500 cap`, async () => {
+    const tooMany = Array.from({ length: MAX_TICKER_COUNT + 1 }, (_, i) => i);
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: tooMany }));
+    expect(res.status).toBe(400);
+  });
+
+  it(`exactly MAX_TICKER_COUNT (${MAX_TICKER_COUNT}) ids is accepted - the full real collection size never gets silently truncated the way a 500-id cap would`, async () => {
+    const fullCollection = Array.from({ length: MAX_TICKER_COUNT }, (_, i) => i);
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: fullCollection }));
+    expect(res.status).toBe(200);
+  });
+
+  it("tokenIds with no saved profiles returns an empty profiles array, never an error", async () => {
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: [920002, 920003] }));
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.profiles).toEqual([]);
   });
 
-  it("GET returns only the profiles that actually exist, correctly matched to their own tokenId - never a profile for a tokenId that was never saved", async () => {
-    await POST(makePostRequest({ tokenId: 920010, displayName: "Batch Token A", imageUrl: "/uploads/a.png" }));
-    await POST(makePostRequest({ tokenId: 920012, displayName: "Batch Token C" }));
+  it("returns only the profiles that actually exist, correctly matched to their own tokenId - never a profile for a tokenId that was never saved", async () => {
+    await POST_SINGLE(makeSinglePostRequest({ tokenId: 920010, displayName: "Batch Token A", imageUrl: "/uploads/a.png" }));
+    await POST_SINGLE(makeSinglePostRequest({ tokenId: 920012, displayName: "Batch Token C" }));
     // 920011 deliberately has no saved profile.
 
-    const res = await GET_BATCH(makeBatchRequest("920010,920011,920012"));
+    const res = await POST_BATCH(makeBatchRequest({ tokenIds: [920010, 920011, 920012] }));
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.profiles).toHaveLength(2);
@@ -70,14 +86,13 @@ describe("app/api/token-profiles route (batch)", () => {
     expect(byId.has(920011)).toBe(false);
   });
 
-  it("a batch GET returns the identical data a single GET would for the same tokenId - the batch path is not a second, divergent read implementation", async () => {
-    await POST(makePostRequest({ tokenId: 920020, displayName: "Parity Check", websiteUrl: "https://example.com" }));
+  it("a batch POST returns the identical data a single GET would for the same tokenId - the batch path is not a second, divergent read implementation", async () => {
+    await POST_SINGLE(makeSinglePostRequest({ tokenId: 920020, displayName: "Parity Check", websiteUrl: "https://example.com" }));
 
-    const { GET: GET_SINGLE } = await import("@/app/api/token-profile/route");
     const singleRes = await GET_SINGLE(new NextRequest("http://localhost/api/token-profile?tokenId=920020"));
     const singleData = await singleRes.json();
 
-    const batchRes = await GET_BATCH(makeBatchRequest("920020"));
+    const batchRes = await POST_BATCH(makeBatchRequest({ tokenIds: [920020] }));
     const batchData = await batchRes.json();
 
     expect(batchData.profiles[0]).toEqual(singleData.profile);
