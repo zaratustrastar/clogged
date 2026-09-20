@@ -52,7 +52,15 @@ class HttpTokenProfileStore implements TokenProfileStore {
   async getMany(tokenIds: number[]): Promise<Map<number, TokenProfile>> {
     if (tokenIds.length === 0) return new Map();
     try {
-      const res = await fetch(`/api/token-profiles?tokenIds=${tokenIds.join(",")}`);
+      // POST with a JSON body, not GET with a comma-separated query string -
+      // the collection can hold up to MAX_TICKER_COUNT (7,778) tokens, well
+      // past what a query string can safely carry across every proxy/browser
+      // this might run behind; see the route's own docs for the full reason.
+      const res = await fetch("/api/token-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tokenIds }),
+      });
       if (!res.ok) return new Map();
       const data = await res.json();
       const profiles: TokenProfile[] = Array.isArray(data.profiles) ? data.profiles : [];

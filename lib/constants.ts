@@ -8,6 +8,13 @@
 export const LAUNCH_PRICE_ETH = 0.002; // TickerRegistry.LAUNCH_PRICE
 export const MAX_PUBLIC_TICKERS = 7_777; // TickerRegistry.MAX_PUBLIC_TICKERS
 export const RESERVED_TICKER = "CLOG";
+// EligibilityRegistry.MAX_TICKERS - the hard cap on tokenId itself
+// (MAX_PUBLIC_TICKERS + the 1 reserved CLOG ticker), not merely the public
+// count above. This is the real upper bound on how many distinct tokenIds
+// a single batch profile-enrichment request could ever need to cover (see
+// app/api/token-profiles/route.ts) - MAX_PUBLIC_TICKERS alone would
+// silently exclude the one reserved id.
+export const MAX_TICKER_COUNT = 7_778; // EligibilityRegistry.MAX_TICKERS
 
 export const TOTAL_SUPPLY = 1_000_000_000; // MemeToken.TOTAL_SUPPLY
 export const CURVE_ALLOCATION = 900_000_000; // BondingCurveClog.CURVE_ALLOCATION
