@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { prizeSkin } from "@/components/machine/Claw";
+import { shouldResetImageFailure } from "@/components/machine/tokenAvatarLogic";
+
+export { shouldResetImageFailure } from "@/components/machine/tokenAvatarLogic";
 
 /**
  * Renders a token's real uploaded image (from its persisted off-chain
@@ -13,6 +16,16 @@ import { prizeSkin } from "@/components/machine/Claw";
  * both, and never a broken-image icon: a failed <img> load flips local
  * state to fall back to prizeSkin on the very same render pass a user would
  * otherwise see the browser's own broken-image glyph.
+ *
+ * The failure flag is reset by ADJUSTING STATE DURING RENDER (React's own
+ * documented pattern for "reset derived state when a prop changes" - see
+ * shouldResetImageFailure above for the actual condition), not inside a
+ * useEffect: this avoids an extra commit+effect+re-render pass (which would
+ * otherwise flash the stale prizeSkin fallback for one frame even after a
+ * previously-broken image has been replaced with a working one) and keeps
+ * useTokenDiscovery's own polling refetch (see its own docs) able to hand
+ * this already-mounted component a new imageUrl for the same token without
+ * a stale failure from the OLD url ever surviving onto the new one.
  *
  * Deliberately a plain <img>, not next/image: every imageUrl this ever
  * receives is a same-site upload (`/uploads/...`, served by
@@ -39,7 +52,14 @@ export function TokenAvatar({
   imageUrl?: string | null;
   className: string;
 }) {
+  const [prevImageUrl, setPrevImageUrl] = useState(imageUrl);
   const [failed, setFailed] = useState(false);
+
+  if (shouldResetImageFailure(prevImageUrl, imageUrl)) {
+    setPrevImageUrl(imageUrl);
+    setFailed(false);
+  }
+
   const showImage = Boolean(imageUrl) && !failed;
 
   if (showImage) {

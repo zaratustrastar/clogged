@@ -1,3 +1,5 @@
+import type { Hex } from "viem";
+
 /**
  * TokenProfileStore - the client-safe adapter boundary for token metadata
  * (image, X, Telegram, website, and a longer display name) that the CLOG
@@ -22,6 +24,20 @@ export interface TokenProfile {
   websiteUrl?: string;
 }
 
+/** The payload set() actually requires: the profile fields above, PLUS the
+ *  EIP-712 signature authorizing exactly them (see
+ *  lib/metadata/tokenProfileAuth.ts) - issuedAt/expiresAt are the same
+ *  values that were signed over, not independently chosen here, since the
+ *  server reconstructs and verifies the identical struct from these three
+ *  fields together. There is deliberately no signerAddress field: the
+ *  server recovers the real signer from `signature` itself and never
+ *  trusts a client-claimed address for anything. */
+export interface TokenProfileUpdate extends TokenProfile {
+  issuedAt: number;
+  expiresAt: number;
+  signature: Hex;
+}
+
 export interface TokenProfileStore {
   get(tokenId: number): Promise<TokenProfile | null>;
   /** Batch read for enriching a whole discovered token list in one round
@@ -32,7 +48,7 @@ export interface TokenProfileStore {
    *  profile" the same way a 0-length tokenIds array or an empty result
    *  set both naturally do. */
   getMany(tokenIds: number[]): Promise<Map<number, TokenProfile>>;
-  set(profile: TokenProfile): Promise<{ persisted: boolean }>;
+  set(update: TokenProfileUpdate): Promise<{ persisted: boolean }>;
 }
 
 class HttpTokenProfileStore implements TokenProfileStore {
@@ -73,12 +89,12 @@ class HttpTokenProfileStore implements TokenProfileStore {
     }
   }
 
-  async set(profile: TokenProfile): Promise<{ persisted: boolean }> {
+  async set(update: TokenProfileUpdate): Promise<{ persisted: boolean }> {
     try {
       const res = await fetch("/api/token-profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(profile),
+        body: JSON.stringify(update),
       });
       if (!res.ok) return { persisted: false };
       const data = await res.json();
