@@ -320,17 +320,23 @@ export default function LaunchPage() {
           {phase === "live" && (profileSaveStatus === "failed" || profileSaveStatus === "saving") ? (
             <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 border border-amber/35 bg-amber/[0.06] p-3">
               <p className="m-0 text-[12.5px] leading-[1.5] text-ink-100">
-                Your token is live, but the name/image/socials you set did not save. This never
-                touches the chain — safe to retry.
+                {profileSaveStatus === "saving"
+                  ? "Saving token details…"
+                  : "Your token is live, but the name/image/socials you set did not save. This never touches the chain — safe to retry."}
               </p>
-              <button
-                type="button"
-                disabled={profileSaveStatus === "saving"}
-                onClick={() => launch.tokenId != null && saveProfile(launch.tokenId)}
-                className="whitespace-nowrap border border-edge-hard bg-chassis-800 px-3 py-2 font-mono text-label text-amber disabled:opacity-50"
-              >
-                {profileSaveStatus === "saving" ? "SAVING…" : "RETRY SAVING DETAILS"}
-              </button>
+              {profileSaveStatus === "saving" ? (
+                <span className="whitespace-nowrap border border-edge-hard bg-chassis-800 px-3 py-2 font-mono text-label text-ink-500 opacity-50">
+                  SAVING…
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => launch.tokenId != null && saveProfile(launch.tokenId)}
+                  className="whitespace-nowrap border border-edge-hard bg-chassis-800 px-3 py-2 font-mono text-label text-amber"
+                >
+                  RETRY SAVING DETAILS
+                </button>
+              )}
             </div>
           ) : null}
         </Cabinet>
