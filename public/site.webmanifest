@@ -1,0 +1,21 @@
+{
+  "name": "CLOG",
+  "short_name": "CLOG",
+  "theme_color": "#0B0A09",
+  "background_color": "#0B0A09",
+  "display": "standalone",
+  "icons": [
+    {
+      "src": "/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
