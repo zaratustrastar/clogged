@@ -30,6 +30,8 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     PoolKey key;
 
     address launchInitializer = address(this); // this test acts as TickerRegistry for setup
+    address tickerOwner = makeAddr("tickerOwner");
+    address multisig = makeAddr("multisig");
 
     // BEFORE_INITIALIZE_FLAG (1<<13) | BEFORE_SWAP_FLAG (1<<7) | BEFORE_SWAP_RETURNS_DELTA_FLAG (1<<3)
     // = 8192 + 128 + 8 = 8328 = 0x2088. Test-only address construction via vm.etch - real
@@ -66,7 +68,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // need re-establishing, which registerMarket (below) does fresh regardless.
 
         token = new MinimalMockToken();
-        market = new ClogMarket(HOOK_ADDRESS, address(token), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
 
         key = PoolKey({
             currency0: Currency.wrap(address(0)), // native ETH
@@ -220,6 +222,44 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
     // ── The actual proof ─────────────────────────────────────────────────────────────────────
 
+    function test_sellSolvencyCap_neverPaysOutMoreThanRealETH() public {
+        // Build up a small amount of genuine realETH via a real buy, then sell a MUCH larger
+        // token position than that one buy could ever have produced - representing tokens
+        // accumulated from other buyers/sources over time, now being exited all at once. A
+        // simple buy-then-sell-what-you-just-bought round trip can never trigger the cap on
+        // its own (constant-product AMMs are self-consistent for that exact case, verified
+        // directly by simulation before writing this test) - the cap exists specifically for
+        // when the curve's own ideal payout, for a position larger than this market's own
+        // realETH can cover, would otherwise promise more than is actually, really held.
+        uint256 buyAmount = 0.01 ether;
+        vm.deal(address(this), buyAmount);
+        _doSwap(true, -int256(buyAmount));
+
+        uint256 realETHBeforeSell = market.realETH();
+        assertGt(realETHBeforeSell, 0, "sanity: must have genuine realETH from the prior buy to actually test the cap against");
+
+        // Mint a much larger position directly - simulating tokens this holder accumulated
+        // from other sources/buyers, not solely from their own single small buy above.
+        uint256 largePosition = 50_000_000e18;
+        token.mint(address(this), largePosition);
+
+        BalanceDelta sellDelta = _doSwap(false, -int256(largePosition));
+        uint256 netEthOut = uint256(int256(sellDelta.amount0()));
+
+        // The cap means grossPayout (before tax) can never exceed realETH-before-the-sell -
+        // and since realETH itself falls to exactly zero when fully capped, this is provable
+        // directly: realETH afterward must be exactly zero, not merely "small".
+        assertEq(market.realETH(), 0, "when capped, realETH must fall to EXACTLY zero - the cap pays out everything real and nothing more, never leaving a small remainder from rounding");
+        assertLe(netEthOut, realETHBeforeSell, "the net payout can never exceed what was actually, really held before the sell, even after tax is deducted from an uncapped-but-large ideal payout");
+
+        // The conservation invariant must still hold exactly even in the capped case.
+        assertEq(
+            manager.balanceOf(address(market), uint256(uint160(address(0)))),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            "the conservation invariant must hold exactly even when the solvency cap triggers"
+        );
+    }
+
     function test_realBuy_everyDeltaZero_marketStateCorrect() public {
         uint256 marketClaimAfterSetup = manager.balanceOf(address(market), uint256(uint160(address(token))));
         assertEq(marketClaimAfterSetup, PHYSICAL_TOKEN_SUPPLY, "sanity: market must hold its full REAL (physical) token claim right after setUp's deposit step, never the virtual seed");
@@ -228,6 +268,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
+        uint256 preRealETH = market.realETH();
         uint256 prePhysicalInventory = market.physicalInventory();
 
         vm.deal(address(this), buyAmount);
@@ -241,15 +282,36 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // ── End-state invariant 2: PoolManager's real ETH balance grew by exactly buyAmount ──
         assertEq(address(manager).balance, preManagerEthBalance + buyAmount, "PM must physically hold the real ETH input - this is what backs the market's own ETH claim");
 
+        // ── Expected tax split, computed independently against the exact production formula ──
+        uint256 expectedTax = (buyAmount * market.BUY_TAX_BPS()) / market.BPS();
+        uint256 expectedBudget = buyAmount - expectedTax;
+        uint256 expectedOwnerShare = (expectedTax * market.TICKER_OWNER_TAX_BPS()) / market.BPS();
+        uint256 expectedMultisigShare = (expectedTax * market.MULTISIG_TAX_BPS()) / market.BPS();
+        uint256 expectedWinnerPotShare = expectedTax - expectedOwnerShare - expectedMultisigShare;
+
+        assertEq(market.pendingWithdrawals(tickerOwner), expectedOwnerShare, "ticker owner's pending withdrawal must match the exact 40%-of-tax formula");
+        assertEq(market.pendingWithdrawals(multisig), expectedMultisigShare, "multisig's pending withdrawal must match the exact 10%-of-tax formula");
+        assertEq(market.winnerPotLiability(), expectedWinnerPotShare, "WinnerPot's own liability accumulator must match the exact residual (tax - owner - multisig)");
+        assertEq(market.realETH(), preRealETH + expectedBudget, "realETH must advance by exactly the POST-TAX budget, not the full gross input");
+
         // ── End-state invariant 3: the market's own ERC6909 claims match the economic result ─
         uint256 tokensOut = uint256(int256(swapDelta.amount1()));
-        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), buyAmount, "market's own ETH claim must equal the full gross input");
+        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), buyAmount, "market's own ETH claim must equal the full gross input - the hook always mints the full specified amount");
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(token)))),
             PHYSICAL_TOKEN_SUPPLY - tokensOut,
             "market's own remaining REAL token claim must be the physical supply minus whatever was actually delivered out"
         );
         assertEq(market.physicalInventory(), prePhysicalInventory - tokensOut, "physicalInventory must fall by exactly tokensOut, matching the real claim exactly");
+
+        // ── THE conservation invariant this pass's tax split must satisfy exactly: the
+        //    market's own ETH claim is fully, exactly accounted for by realETH plus every
+        //    liability bucket - no untracked "extra" balance, no double-counting. ──────────
+        assertEq(
+            manager.balanceOf(address(market), uint256(uint160(address(0)))),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            "market's ETH claim must equal realETH + every liability bucket, exactly - the core conservation property this pass's tax split relies on"
+        );
 
         // ── End-state invariant 4: the hook itself holds NOTHING - it never accumulates ──────
         assertEq(manager.balanceOf(HOOK_ADDRESS, uint256(uint160(address(0)))), 0, "hook must hold zero ETH claim of its own - it only ever passes claims to the market");
@@ -260,7 +322,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         assertEq(manager.balanceOf(address(this), uint256(uint160(address(token)))), 0, "the router took REAL tokens, not a claim - no claim balance should exist for the router");
 
         // ── End-state invariant 6: ClogMarket's own curve state updated exactly once, correctly ─
-        assertEq(market.re(), preRe + buyAmount, "curve re must have advanced by exactly the gross input (no tax in this slice)");
+        assertEq(market.re(), preRe + expectedBudget, "curve re must have advanced by exactly the POST-TAX budget, matching production's own budget/tax split exactly");
         assertGt(tokensOut, 0, "must have actually received tokens");
         assertEq(market.sold(), tokensOut, "market's own sold counter must match what was actually delivered");
         assertEq(market.k(), market.re() * market.rt(), "k must be re-anchored to the CURRENT (re, rt) exactly after the trade, matching production's own re-anchor");
@@ -281,38 +343,64 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
         uint256 preRt = market.rt();
+        uint256 preK = market.k();
         uint256 preSold = market.sold();
+        uint256 preRealETH = market.realETH();
+        uint256 preOwnerPending = market.pendingWithdrawals(tickerOwner);
+        uint256 preMultisigPending = market.pendingWithdrawals(multisig);
+        uint256 preWinnerPotLiability = market.winnerPotLiability();
         uint256 prePhysicalInventory = market.physicalInventory();
         uint256 preMarketTokenClaim = manager.balanceOf(address(market), uint256(uint160(address(token))));
         uint256 preMarketEthClaim = manager.balanceOf(address(market), uint256(uint160(address(0))));
         uint256 preUserEthBalance = address(this).balance;
 
         BalanceDelta sellDelta = _doSwap(false, -int256(sellAmount));
-        uint256 ethOut = uint256(int256(sellDelta.amount0()));
+        uint256 netEthOut = uint256(int256(sellDelta.amount0()));
 
         // ── End-state invariant 1: the unlock succeeded (same reasoning as the buy test) ────
 
-        // ── End-state invariant 2: PoolManager's real ETH balance fell by exactly ethOut ────
-        assertEq(address(manager).balance, preManagerEthBalance - ethOut, "PM must physically release exactly ethOut - it was real ETH backing the market's own claim");
+        // ── End-state invariant 2: PoolManager's real ETH balance fell by exactly netEthOut ──
+        assertEq(address(manager).balance, preManagerEthBalance - netEthOut, "PM must physically release exactly netEthOut (post-tax) - it was real ETH backing the market's own claim");
 
         // ── End-state invariant 3: the market's own ERC6909 claims match the economic result ─
-        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), preMarketEthClaim - ethOut, "market's own ETH claim must fall by exactly ethOut (burned to pay the seller)");
+        // Not capped in this test (the reserve is far larger than one small sell), so
+        // grossPayout is derivable directly from the curve without needing the cap branch.
+        uint256 grossPayout = preRe - preK / (preRt + sellAmount); // re-derived independently, using the actual stored k (not recomputed) so this matches ClogMarket's own math exactly
+        uint256 expectedTax = (grossPayout * market.SELL_TAX_BPS()) / market.BPS();
+        assertEq(grossPayout - expectedTax, netEthOut, "sanity: independently re-derived netEthOut must match the actual delta the swap produced");
+        uint256 expectedOwnerShare = (expectedTax * market.TICKER_OWNER_TAX_BPS()) / market.BPS();
+        uint256 expectedMultisigShare = (expectedTax * market.MULTISIG_TAX_BPS()) / market.BPS();
+        uint256 expectedWinnerPotShare = expectedTax - expectedOwnerShare - expectedMultisigShare;
+
+        assertEq(market.pendingWithdrawals(tickerOwner), preOwnerPending + expectedOwnerShare, "ticker owner's pending withdrawal must grow by exactly the 40%-of-sell-tax formula");
+        assertEq(market.pendingWithdrawals(multisig), preMultisigPending + expectedMultisigShare, "multisig's pending withdrawal must grow by exactly the 10%-of-sell-tax formula");
+        assertEq(market.winnerPotLiability(), preWinnerPotLiability + expectedWinnerPotShare, "WinnerPot's own liability accumulator must grow by exactly the residual sell-tax share");
+        assertEq(market.realETH(), preRealETH - grossPayout, "realETH must fall by the full GROSS payout, not merely the net amount paid to the seller");
+
+        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), preMarketEthClaim - netEthOut, "market's own ETH claim must fall by exactly netEthOut (burned to pay the seller) - the conservation proof: reserve falls by grossPayout, liabilities rise by tax, net change is exactly netEthOut");
         assertEq(manager.balanceOf(address(market), uint256(uint160(address(token)))), preMarketTokenClaim + sellAmount, "market's own token claim must grow by exactly the tokens sold back in (minted from the router's real deposit)");
         assertEq(market.physicalInventory(), prePhysicalInventory + sellAmount, "physicalInventory must grow by exactly sellAmount - the sold-back tokens are real inventory again");
+
+        // ── THE conservation invariant, same as the buy test - must hold after a sell too ───
+        assertEq(
+            manager.balanceOf(address(market), uint256(uint160(address(0)))),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            "market's ETH claim must equal realETH + every liability bucket, exactly, after a sell too"
+        );
 
         // ── End-state invariant 4: the hook itself holds NOTHING - it never accumulates ──────
         assertEq(manager.balanceOf(HOOK_ADDRESS, uint256(uint160(address(0)))), 0, "hook must hold zero ETH claim of its own after a sell either");
         assertEq(manager.balanceOf(HOOK_ADDRESS, uint256(uint160(address(token)))), 0, "hook must hold zero token claim of its own after a sell either");
 
         // ── End-state invariant 5: the user actually received real ETH, and paid real tokens ─
-        assertEq(address(this).balance, preUserEthBalance + ethOut, "the router must hold real native ETH delivered by take(), not a claim");
+        assertEq(address(this).balance, preUserEthBalance + netEthOut, "the router must hold real native ETH delivered by take(), not a claim");
         assertEq(token.balanceOf(address(this)), tokensHeld - sellAmount, "the router's real token balance must fall by exactly what it sold");
         assertEq(manager.balanceOf(address(this), uint256(uint160(address(0)))), 0, "no lingering ETH claim on the router's own account");
 
         // ── End-state invariant 6: ClogMarket's own curve state updated exactly once, correctly ─
         assertEq(market.rt(), preRt + sellAmount, "curve rt must have advanced by exactly the tokens sold in");
-        assertEq(market.re(), preRe - ethOut, "curve re must have fallen by exactly the ETH paid out (no tax in this slice)");
-        assertGt(ethOut, 0, "must have actually received ETH");
+        assertEq(market.re(), preRe - grossPayout, "curve re must have fallen by exactly the GROSS payout (pre-tax), matching production's own re update exactly");
+        assertGt(netEthOut, 0, "must have actually received ETH");
         assertEq(market.sold(), preSold - sellAmount, "sold must decrement by exactly the tokens sold back in, matching production's own sell() exactly");
         assertEq(market.k(), market.re() * market.rt(), "k must be re-anchored to the CURRENT (re, rt) exactly after the trade, matching production's own re-anchor");
     }

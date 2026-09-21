@@ -1,111 +1,196 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-/// @title ClogMarket (vertical-slice version, corrected)
+import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
+
+/// @title ClogMarket (vertical-slice version, now with full trading-tax economics)
 /// @notice Non-custodial per-ticker economic state engine - the intended descendant of
 ///         BondingCurveClog.sol, refactored to hold ZERO custody of ETH/tokens itself. All
 ///         actual value movement happens through PoolManager's flash accounting (ERC6909
 ///         claims this contract owns), driven by the universal ClogV4Hook calling into this
 ///         contract's pure state-transition functions from inside beforeSwap.
 ///
-/// @dev DELIBERATELY MINIMAL - this is the first proof that the custody/claim mechanism
-///      itself works end-to-end against the real PoolManager, isolated from the full
-///      production economics (buy/sell tax split, the separate 100M CLOG-reserve/release/
-///      extraction leg, ticker-owner-fee-via-NFT-ownership, the sell-side solvency CAP at
-///      realETH/wasCapped) - none of which are ported yet. This gap is explicit and
-///      acknowledged, not an oversight - see the conversation this was built in for the full
-///      remaining scope.
+/// @dev STILL DELIBERATELY DEFERRED, explicitly (not an oversight): the separate 100M
+///      CLOG-reserve/release/extraction leg (RELEASE_RATIO_BPS, targetExtractionBps,
+///      safetyFloorBps, the iterative curve/CLOG budget split); ticker-owner-fee via live
+///      TickerNFT.ownerOf() lookup (this slice uses a fixed immutable address instead); the
+///      actual WinnerPot-share ETH routing mechanism (mint-to-RewardVault + recordWinnerPotClaim -
+///      this contract computes and tracks the WinnerPot share as its own liability bucket for
+///      now, exactly like owner/multisig, pending that separate integration piece).
 ///
-/// @dev CRITICAL, corrected this pass: virtualTokenSeed (`rt`'s starting value, 1.8B under
-///      Config G) is a PRICING construct only - Math.mulDiv(CURVE_ALLOCATION, bufferMultiplierBps,
-///      BPS) in the real BondingCurveClog.sol, deliberately "deeper" than the real token count
-///      so the curve behaves correctly. It is NEVER how many real MemeTokens physically exist -
-///      that is MemeToken.TOTAL_SUPPLY, exactly 1B (900M curve + 100M CLOG allocation),
-///      confirmed directly against the real production source. `physicalInventory` here tracks
-///      that separate, real 1B constraint - mirroring the real contract's own
-///      `token.balanceOf(address(this)) >= totalTokensOut` safety check (that check compares
-///      against actual custody; this market has none, so it tracks the equivalent quantity
-///      directly as state instead, backed 1:1 by the market's own real ERC6909 token claim).
+/// @dev NOW PORTED, this pass, verified against the exact production BondingCurveClog.sol
+///      source before implementing: the full 0.6% buy/sell trading tax, split 40% ticker-owner
+///      / 10% multisig / 50% WinnerPot; the pull-payment pendingWithdrawals ledger for
+///      owner/multisig (_credit's exact semantics); realETH tracked SEPARATELY from the
+///      virtual pricing reserve (re = virtualEthSeed + realETH, always) - required correctly
+///      to support the sell-side solvency cap below; the sell-side solvency cap itself
+///      (grossPayout capped at realETH, `wasCapped` returned, matching production's own
+///      "never pay out more than what is actually held" guard exactly); k re-anchoring and the
+///      sold counter (both already ported in the prior pass) remain correct under the new tax
+///      math, verified by this pass's own tests.
 contract ClogMarket {
+    uint256 public constant BPS = 10_000;
+    uint256 public constant BUY_TAX_BPS = 60; // 0.6%
+    uint256 public constant SELL_TAX_BPS = 60; // 0.6%
+    uint256 public constant TICKER_OWNER_TAX_BPS = 4_000; // 40% of the tax
+    uint256 public constant MULTISIG_TAX_BPS = 1_000; // 10% of the tax
+    // WinnerPot gets the remainder (BPS - TICKER_OWNER_TAX_BPS - MULTISIG_TAX_BPS = 50%),
+    // computed as a residual exactly like production's own _routeTax - never re-derived from
+    // its own separate BPS constant, so the three shares can never fail to sum to the tax
+    // exactly regardless of rounding.
+
     address public immutable hook; // the universal ClogV4Hook - the only caller allowed to trigger state transitions
     address public immutable token; // this ticker's MemeToken
+    address public immutable tickerOwner; // fixed for this slice - live TickerNFT.ownerOf() lookup is a deferred, separate piece (see contract-level docs)
+    address public immutable multisig;
 
-    uint256 public re; // ETH-side reserve (virtual + real, undifferentiated in this slice)
+    uint256 public re; // virtualEthSeed + realETH, always - drives curve pricing
     uint256 public rt; // token-side PRICING reserve (virtual - starts far above physical supply, by design)
     uint256 public k; // re * rt, re-anchored after every trade
     uint256 public sold;
+    uint256 public immutable virtualEthSeed;
+    uint256 public realETH; // the REAL portion of re - never includes the virtual seed. This is
+        // what actually backs withdrawals/payouts and what the sell-side solvency cap bounds
+        // against, matching production's own realETH exactly.
 
-    /// @notice Real MemeToken units still available to deliver - starts at MemeToken.TOTAL_SUPPLY
-    ///         (1B), NEVER at virtualTokenSeed. Decrements on every buy's tokensOut, increments
-    ///         on every sell's tokensIn. This is the vertical slice's stand-in for the real
-    ///         contract's own token.balanceOf(address(this)) check - see contract-level docs.
-    uint256 public physicalInventory;
+    uint256 public physicalInventory; // see prior pass's own docs - real MemeToken units still available to deliver
 
-    event Bought(uint256 grossInput, uint256 tokensOut, uint256 newRe, uint256 newRt);
-    event Sold(uint256 tokensIn, uint256 ethOut, uint256 newRe, uint256 newRt);
+    mapping(address => uint256) public pendingWithdrawals; // pull-payment ledger, mirroring production's own _credit/withdraw exactly
+
+    /// @notice WinnerPot's own accumulated share of tax - tracked explicitly, separately from
+    ///         pendingWithdrawals, because it is money owed to RewardVault, not a direct
+    ///         withdrawer. This keeps this market's own ETH claim invariant fully accounted for
+    ///         even before the real WinnerPot-direct-routing mechanism (mint-to-RewardVault +
+    ///         recordWinnerPotClaim) exists: market's ETH claim == realETH +
+    ///         pendingWithdrawals[owner] + pendingWithdrawals[multisig] + winnerPotLiability,
+    ///         always, exactly - never an untracked "extra" balance sitting on the claim with
+    ///         no corresponding state anywhere. See contract-level docs for what's still deferred.
+    uint256 public winnerPotLiability;
+
+    event Bought(uint256 grossInput, uint256 tax, uint256 tokensOut, uint256 newRe, uint256 newRt);
+    event Sold(uint256 tokensIn, uint256 grossPayout, uint256 tax, uint256 netEthOut, bool wasCapped, uint256 newRe, uint256 newRt);
+    event Credited(address indexed to, uint256 amount, uint256 newPending);
 
     modifier onlyHook() {
         require(msg.sender == hook, "not hook");
         _;
     }
 
-    constructor(address hook_, address token_, uint256 virtualEthSeed, uint256 virtualTokenSeed, uint256 physicalTokenSupply) {
-        require(hook_ != address(0) && token_ != address(0), "zero address");
-        require(virtualEthSeed > 0 && virtualTokenSeed > 0, "zero seed");
+    constructor(
+        address hook_,
+        address token_,
+        address tickerOwner_,
+        address multisig_,
+        uint256 virtualEthSeed_,
+        uint256 virtualTokenSeed,
+        uint256 physicalTokenSupply
+    ) {
+        require(hook_ != address(0) && token_ != address(0) && tickerOwner_ != address(0) && multisig_ != address(0), "zero address");
+        require(virtualEthSeed_ > 0 && virtualTokenSeed > 0, "zero seed");
         require(physicalTokenSupply > 0, "zero physical supply");
         require(physicalTokenSupply <= virtualTokenSeed, "physical supply must never exceed the virtual pricing reserve");
         hook = hook_;
         token = token_;
-        re = virtualEthSeed;
+        tickerOwner = tickerOwner_;
+        multisig = multisig_;
+        virtualEthSeed = virtualEthSeed_;
+        re = virtualEthSeed_;
         rt = virtualTokenSeed;
         k = re * rt;
         physicalInventory = physicalTokenSupply;
     }
 
-    /// @notice Pure state transition for a buy - no ETH/token ever moves through this
-    ///         function or this contract at all. Called by the hook mid-beforeSwap; the
-    ///         FULL gross input (no tax deducted in this slice - see contract-level docs)
-    ///         is what the hook must account for via a claim it mints to this contract.
-    function applyBuy(uint256 grossInput) external onlyHook returns (uint256 tokensOut) {
+    /// @notice Full-tax-aware buy. Called by the hook mid-beforeSwap with the FULL exact
+    ///         input (grossInput) - the hook mints a claim for this same full amount, per the
+    ///         conservation proof from this branch's own design discussion (every wei of
+    ///         grossInput must appear exactly once across realETH + ownerLiability +
+    ///         multisigLiability + winnerPotLiability).
+    function applyBuy(uint256 grossInput) external onlyHook returns (uint256 tokensOut, uint256 winnerPotShare) {
         require(grossInput > 0, "zero input");
-        uint256 newRt = k / (re + grossInput);
+
+        uint256 tax = Math.mulDiv(grossInput, BUY_TAX_BPS, BPS);
+        uint256 budget = grossInput - tax;
+
+        uint256 ownerShare = Math.mulDiv(tax, TICKER_OWNER_TAX_BPS, BPS);
+        uint256 multisigShare = Math.mulDiv(tax, MULTISIG_TAX_BPS, BPS);
+        winnerPotShare = tax - ownerShare - multisigShare; // residual - see contract-level docs
+
+        uint256 newRt = k / (re + budget);
         tokensOut = rt - newRt;
         require(tokensOut > 0, "zero output");
-        // The exact safety property this vertical slice must preserve from production: the
-        // virtual curve can imply more tokens than physically exist for a large enough input,
-        // but a buy must never promise tokens that aren't actually available - it reverts
-        // cleanly rather than under-delivering or lying about the market's own inventory.
         require(tokensOut <= physicalInventory, "exceeds available token inventory");
 
-        re += grossInput;
+        re += budget;
+        realETH += budget;
         rt = newRt;
         sold += tokensOut;
         physicalInventory -= tokensOut;
-        k = re * rt; // re-anchor: k must always reflect the CURRENT, honest (re, rt) exactly,
-            // matching production's own re-anchor after every state transition - otherwise
-            // integer-division rounding in `newRt` above would let k silently drift over time.
+        k = re * rt; // re-anchor - see prior pass's own docs
 
-        emit Bought(grossInput, tokensOut, re, rt);
+        _credit(tickerOwner, ownerShare);
+        _credit(multisig, multisigShare);
+        // winnerPotShare is tracked in its own accumulator (winnerPotLiability), not
+        // pendingWithdrawals - see the state variable's own docs for why. The hook still mints
+        // this same amount into the market's overall ETH claim; this accumulator is what keeps
+        // that claim's own composition fully, explicitly accounted for in the meantime.
+        winnerPotLiability += winnerPotShare;
+
+        emit Bought(grossInput, tax, tokensOut, re, rt);
     }
 
-    /// @notice Pure state transition for a sell - symmetric to applyBuy. Returns the full
-    ///         gross ETH payout (no tax deducted, no solvency cap at realETH in this slice -
-    ///         see contract-level docs) the hook must account for by burning that much of this
-    ///         contract's own ETH claim.
-    function applySell(uint256 tokensIn) external onlyHook returns (uint256 ethOut) {
+    /// @notice Full-tax-aware, solvency-capped sell. Returns netEthOut (what the hook must
+    ///         account for by burning that much of this contract's own ETH claim - burning
+    ///         only netEthOut, never grossPayout, keeps
+    ///         hook claim == realETH + ownerLiability + multisigLiability + winnerPotLiability
+    ///         exactly balanced, per the conservation proof already established: the reserve's
+    ///         decrease by grossPayout is exactly offset by the liability increase of tax).
+    function applySell(uint256 tokensIn) external onlyHook returns (uint256 netEthOut, uint256 winnerPotShare, bool wasCapped) {
         require(tokensIn > 0, "zero input");
-        uint256 newRe = k / (rt + tokensIn);
-        ethOut = re - newRe;
-        require(ethOut > 0, "zero output");
-        require(ethOut <= re, "exceeds reserve");
 
+        uint256 newRt = rt + tokensIn;
+        uint256 idealNewRe = k / newRt;
+        uint256 idealPayout = re - idealNewRe;
+
+        uint256 grossPayout;
+        if (idealPayout > realETH) {
+            // THE solvency guard, verified against production exactly: never pay out more
+            // than what is actually, really held - the virtual seed is never spendable.
+            grossPayout = realETH;
+            wasCapped = true;
+        } else {
+            grossPayout = idealPayout;
+        }
+        require(grossPayout > 0, "zero output");
+
+        uint256 newRe = re - grossPayout;
+        realETH -= grossPayout;
         re = newRe;
-        rt += tokensIn;
-        sold = sold > tokensIn ? sold - tokensIn : 0; // matches production exactly: sold tracks
-            // net circulating curve-leg supply, so a sell must reverse a buy's own increment.
-        physicalInventory += tokensIn; // the tokens sold back in are real inventory again
-        k = re * rt; // re-anchor - same reasoning as applyBuy above.
+        rt = newRt;
+        k = re * rt; // re-anchor: if capping occurred, k now reflects the ACTUAL (re, rt), not
+            // the uncapped formula's implied state - matching production's own comment exactly.
+        sold = sold > tokensIn ? sold - tokensIn : 0;
+        physicalInventory += tokensIn;
 
-        emit Sold(tokensIn, ethOut, re, rt);
+        uint256 tax = Math.mulDiv(grossPayout, SELL_TAX_BPS, BPS);
+        netEthOut = grossPayout - tax;
+
+        uint256 ownerShare = Math.mulDiv(tax, TICKER_OWNER_TAX_BPS, BPS);
+        uint256 multisigShare = Math.mulDiv(tax, MULTISIG_TAX_BPS, BPS);
+        winnerPotShare = tax - ownerShare - multisigShare;
+
+        _credit(tickerOwner, ownerShare);
+        _credit(multisig, multisigShare);
+        winnerPotLiability += winnerPotShare;
+
+        emit Sold(tokensIn, grossPayout, tax, netEthOut, wasCapped, re, rt);
+    }
+
+    /// @dev Pull-payment credit - mirrors production's own _credit exactly: no external call
+    ///      happens here at all, so this can never be a reentrancy surface and can never let a
+    ///      broken/malicious recipient block anyone else's trade.
+    function _credit(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        pendingWithdrawals[to] += amount;
+        emit Credited(to, amount, pendingWithdrawals[to]);
     }
 }

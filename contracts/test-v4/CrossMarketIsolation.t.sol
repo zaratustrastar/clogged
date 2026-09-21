@@ -33,6 +33,8 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
     PoolKey keyB;
 
     address constant HOOK_ADDRESS = address(0x2088); // see ClogV4HookBuySell.t.sol for the flag derivation
+    address tickerOwner = makeAddr("tickerOwner");
+    address multisig = makeAddr("multisig");
 
     uint256 constant VIRTUAL_ETH_SEED = 9 ether;
     // Config G's own virtualTokenSeed - a PRICING reserve only, never real token count (see
@@ -57,7 +59,7 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
 
     function _setUpMarket(string memory label, bool isMarketA) internal returns (ClogMarket m, MinimalMockToken t, PoolKey memory k) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
         k = PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
 
         hook.registerMarket(k, address(m));

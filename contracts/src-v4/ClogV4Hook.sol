@@ -132,7 +132,11 @@ contract ClogV4Hook is IHooks {
         uint256 unspecifiedAmount;
 
         if (buyingToken) {
-            uint256 tokensOut = ClogMarket(market).applyBuy(specifiedAmount);
+            (uint256 tokensOut, uint256 winnerPotShare) = ClogMarket(market).applyBuy(specifiedAmount);
+            winnerPotShare; // not yet routed anywhere separately - see ClogMarket's own docs on
+                // what's still deferred; the full specifiedAmount minted below already covers
+                // it as part of the market's own overall claim, tracked internally by the
+                // market's own winnerPotLiability accumulator.
             // Hook temporarily goes negative ETH (it just minted the market a claim for the
             // full specified input) and positive token (it just burned the market's own
             // pre-existing token claim to cover tokensOut) - see contract-level docs for why
@@ -141,10 +145,12 @@ contract ClogV4Hook is IHooks {
             poolManager.burn(market, _currencyId(key.currency1), tokensOut);
             unspecifiedAmount = tokensOut;
         } else {
-            uint256 ethOut = ClogMarket(market).applySell(specifiedAmount);
+            (uint256 netEthOut, uint256 winnerPotShare, bool wasCapped) = ClogMarket(market).applySell(specifiedAmount);
+            winnerPotShare; // same as above - deferred routing, already covered by the market's own tracking
+            wasCapped; // informational only in this slice - not yet surfaced to the router/event layer
             poolManager.mint(market, _currencyId(key.currency1), specifiedAmount);
-            poolManager.burn(market, _currencyId(key.currency0), ethOut);
-            unspecifiedAmount = ethOut;
+            poolManager.burn(market, _currencyId(key.currency0), netEthOut);
+            unspecifiedAmount = netEthOut;
         }
 
         // Direction-independent in "specified"/"unspecified" terms (Hooks.sol's own afterSwap

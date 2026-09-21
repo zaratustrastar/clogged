@@ -22,6 +22,8 @@ contract MarketRegistrationTest is Test {
     ClogV4Hook hook;
 
     address constant HOOK_ADDRESS = address(0x2088); // see ClogV4HookBuySell.t.sol for the flag derivation
+    address tickerOwner = makeAddr("tickerOwner");
+    address multisig = makeAddr("multisig");
     uint256 constant VIRTUAL_ETH_SEED = 9 ether;
     uint256 constant VIRTUAL_TOKEN_SEED = 1_800_000_000e18;
     uint256 constant PHYSICAL_TOKEN_SUPPLY = 1_000_000_000e18;
@@ -35,7 +37,7 @@ contract MarketRegistrationTest is Test {
 
     function _realMarketAndToken() internal returns (ClogMarket m, MinimalMockToken t) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
     }
 
     // ── Authorized caller, wrong token paired against a real market ─────────────────────────
@@ -74,7 +76,7 @@ contract MarketRegistrationTest is Test {
         // A market constructed pointing at a DIFFERENT hook than the one performing registration -
         // its own onlyHook modifier would reject every real trade call anyway, but this must be
         // caught at registration time, not discovered later as a silently-dead market.
-        ClogMarket misconfiguredMarket = new ClogMarket(differentHook, address(t), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        ClogMarket misconfiguredMarket = new ClogMarket(differentHook, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
 
         PoolKey memory key =
             PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
