@@ -7,6 +7,7 @@ import {MemeToken} from "../src/MemeToken.sol";
 import {EligibilityRegistry} from "../src/EligibilityRegistry.sol";
 import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
+import {RewardVault} from "../src/RewardVault.sol";
 
 /// @title Economic-equivalence harness: ClogMarket (v4) vs production BondingCurveClog
 /// @notice Deploys BOTH systems with IDENTICAL initial parameters, drives them through the
@@ -25,10 +26,12 @@ import {ClogMarket} from "../src-v4/ClogMarket.sol";
 ///      realETH, pendingWithdrawals[ticketOwner], pendingWithdrawals[multisig], and the
 ///      per-trade output itself (totalTokensOut on a buy, netEthOut on a sell). WinnerPot is
 ///      compared as production's own winnerPotGenerated (cumulative ETH ever routed toward
-///      winnerPot, delivered or not - confirmed directly against source) against ClogMarket's
-///      own winnerPotLiability accumulator - the two are the correct analogs of each other even
-///      though production pushes directly and ClogMarket tracks a liability pending the
-///      still-deferred WinnerPot-routing integration (see ClogMarket.sol's own docs).
+///      winnerPot, delivered or not - confirmed directly against source) against a real
+///      RewardVault's own unallocatedPool, fed via recordWinnerPotClaim after every trade -
+///      mimicking exactly what the real ClogV4Hook's beforeSwap does, since this harness has no
+///      real PoolManager to route the matching ERC6909 claim through (the custody side of that
+///      routing is proven separately elsewhere in this profile; this harness compares economic
+///      STATE only).
 ///
 /// @dev NOT covered by this harness, explicitly: ticker-owner-fee via live
 ///      TickerNFT.ownerOf() (production resolves it dynamically every trade; ClogMarket uses a
@@ -44,6 +47,7 @@ contract EconomicEquivalenceTest is Test {
     EligibilityRegistry engine;
 
     ClogMarket v4Market;
+    RewardVault rewardVault;
 
     address ticketOwner = makeAddr("ticketOwner");
     address multisig = makeAddr("multisig");
@@ -73,6 +77,14 @@ contract EconomicEquivalenceTest is Test {
         // ── v4 ClogMarket - IDENTICAL initial parameters, this test contract as its own hook ──
         v4Market = new ClogMarket(address(this), address(productionToken), address(tickerNFT), 1, multisig, virtualEthSeed, BUFFER_BPS);
 
+        // A real RewardVault, standing in for what the real ClogV4Hook would route WinnerPot's
+        // own share to on every trade - poolManager is never actually invoked in this harness
+        // (no real PoolManager/custody exists here at all, since this harness compares only the
+        // two systems' economic STATE), so a dummy nonzero placeholder satisfies the
+        // constructor's own "set together or not at all" pairing requirement without ever being
+        // called.
+        rewardVault = new RewardVault(address(this), address(0x1), address(this));
+
         vm.deal(address(this), 10_000 ether);
         productionToken.approve(address(production), type(uint256).max);
     }
@@ -92,7 +104,20 @@ contract EconomicEquivalenceTest is Test {
         assertEq(production.realETH(), v4Market.realETH(), string.concat(context, ": realETH mismatch"));
         assertEq(production.pendingWithdrawals(ticketOwner), v4Market.pendingWithdrawals(ticketOwner), string.concat(context, ": ticker owner pendingWithdrawals mismatch"));
         assertEq(production.pendingWithdrawals(multisig), v4Market.pendingWithdrawals(multisig), string.concat(context, ": multisig pendingWithdrawals mismatch"));
-        assertEq(production.winnerPotGenerated(), v4Market.winnerPotLiability(), string.concat(context, ": WinnerPot total (generated vs liability) mismatch"));
+        assertEq(production.winnerPotGenerated(), rewardVault.unallocatedPool(), string.concat(context, ": WinnerPot total (production's winnerPotGenerated vs RewardVault's own unallocatedPool) mismatch"));
+    }
+
+    /// @dev Mimics exactly what the real ClogV4Hook's beforeSwap does with a trade's own
+    ///      winnerPotShare - calls RewardVault's recordWinnerPotClaim synchronously, in the same
+    ///      "transaction" as the trade itself (this harness has no real PoolManager to actually
+    ///      mint the matching ERC6909 claim through, since it compares economic STATE only - see
+    ///      this file's own top-level docs), so the accounting side of the claim-native routing
+    ///      is exercised identically to production even though the custody side is proven
+    ///      separately elsewhere in this profile.
+    function _routeWinnerPotShare(uint256 winnerPotShare) internal {
+        if (winnerPotShare > 0) {
+            rewardVault.recordWinnerPotClaim(winnerPotShare);
+        }
     }
 
     function test_initialState_matchesExactly() public view {
@@ -102,7 +127,8 @@ contract EconomicEquivalenceTest is Test {
     function test_singleBuy_matchesExactly() public {
         uint256 buyAmount = 0.05 ether; // large enough to trigger a real CLOG-leg release in both systems
         uint256 productionTokensOut = production.buy{value: buyAmount}(0, block.timestamp);
-        (uint256 v4TokensOut,) = v4Market.applyBuy(buyAmount);
+        (uint256 v4TokensOut, uint256 winnerPotShare) = v4Market.applyBuy(buyAmount);
+        _routeWinnerPotShare(winnerPotShare);
 
         assertEq(productionTokensOut, v4TokensOut, "a single buy's own token output must match exactly");
         _assertFullEquivalence("after one buy");
@@ -111,13 +137,15 @@ contract EconomicEquivalenceTest is Test {
     function test_buyThenPartialSell_matchesExactly() public {
         uint256 buyAmount = 0.05 ether;
         uint256 productionTokensOut = production.buy{value: buyAmount}(0, block.timestamp);
-        (uint256 v4TokensOut,) = v4Market.applyBuy(buyAmount);
+        (uint256 v4TokensOut, uint256 buyWinnerPotShare) = v4Market.applyBuy(buyAmount);
+        _routeWinnerPotShare(buyWinnerPotShare);
         assertEq(productionTokensOut, v4TokensOut, "sanity: buy outputs must match before testing the sell");
         _assertFullEquivalence("after the buy, before the sell");
 
         uint256 sellAmount = productionTokensOut / 2;
         (uint256 productionNetEthOut,) = production.sell(sellAmount, 0, block.timestamp);
-        (uint256 v4NetEthOut,,) = v4Market.applySell(sellAmount);
+        (uint256 v4NetEthOut, uint256 sellWinnerPotShare,) = v4Market.applySell(sellAmount);
+        _routeWinnerPotShare(sellWinnerPotShare);
 
         assertEq(productionNetEthOut, v4NetEthOut, "a single sell's own net ETH output must match exactly");
         _assertFullEquivalence("after the buy and the partial sell");
@@ -137,7 +165,8 @@ contract EconomicEquivalenceTest is Test {
 
         for (uint256 i = 0; i < buySizes.length; i++) {
             uint256 productionTokensOut = production.buy{value: buySizes[i]}(0, block.timestamp);
-            (uint256 v4TokensOut,) = v4Market.applyBuy(buySizes[i]);
+            (uint256 v4TokensOut, uint256 winnerPotShare) = v4Market.applyBuy(buySizes[i]);
+            _routeWinnerPotShare(winnerPotShare);
             assertEq(productionTokensOut, v4TokensOut, string.concat("buy #", vm.toString(i), ": token output mismatch"));
             tokensFromEachBuy[i] = productionTokensOut;
             _assertFullEquivalence(string.concat("after buy #", vm.toString(i)));
@@ -151,7 +180,8 @@ contract EconomicEquivalenceTest is Test {
             uint256 sellAmount = (tokensFromEachBuy[i] * sellFractionsBps[i]) / 10_000;
             if (sellAmount == 0) continue;
             (uint256 productionNetEthOut,) = production.sell(sellAmount, 0, block.timestamp);
-            (uint256 v4NetEthOut,,) = v4Market.applySell(sellAmount);
+            (uint256 v4NetEthOut, uint256 winnerPotShare,) = v4Market.applySell(sellAmount);
+            _routeWinnerPotShare(winnerPotShare);
             assertEq(productionNetEthOut, v4NetEthOut, string.concat("sell #", vm.toString(i), ": net ETH output mismatch"));
             _assertFullEquivalence(string.concat("after sell #", vm.toString(i)));
         }

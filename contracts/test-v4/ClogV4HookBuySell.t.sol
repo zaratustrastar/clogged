@@ -14,6 +14,7 @@ import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
+import {RewardVault} from "../src/RewardVault.sol";
 
 /// @notice Proves the core custody mechanism end-to-end against the REAL, unmodified v4-core
 ///         PoolManager (not a mock, not a fork) - a real buy, with every currency delta
@@ -27,6 +28,7 @@ import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     PoolManager manager;
     ClogV4Hook hook;
+    RewardVault rewardVault;
     ClogMarket market;
     MinimalMockToken token;
     PoolKey key;
@@ -69,8 +71,17 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         hook = ClogV4Hook(HOOK_ADDRESS);
         // vm.etch only copies bytecode, not storage - immutables (poolManager,
         // launchInitializer) are inlined directly into bytecode by the compiler, so they're
-        // already correct on the etched copy; only real mapping storage (marketOf/poolOf) would
-        // need re-establishing, which registerMarket (below) does fresh regardless.
+        // already correct on the etched copy; only real mapping/storage state (marketOf/poolOf/
+        // rewardVault) would need re-establishing, which registerMarket/setRewardVault (below)
+        // do fresh regardless, against HOOK_ADDRESS itself (not the impl, whose own storage
+        // never gets copied anywhere).
+
+        // Breaks the hook<->RewardVault constructor cycle: the hook is deployed first (2-param
+        // constructor, no RewardVault dependency at all), RewardVault is deployed second (its
+        // own constructor needs HOOK_ADDRESS, which is already known - a fixed constant, not
+        // predicted), then setRewardVault wires the hook to it exactly once.
+        rewardVault = new RewardVault(address(this), address(manager), HOOK_ADDRESS);
+        hook.setRewardVault(address(rewardVault));
 
         token = new MinimalMockToken();
         tickerNFT = new MockTickerNFT();
@@ -279,7 +290,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // The conservation invariant must still hold exactly even in the capped case.
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(0)))),
-            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig),
             "the conservation invariant must hold exactly even when the solvency cap triggers"
         );
     }
@@ -322,7 +333,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // sequence of trades.
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(0)))),
-            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig),
             "the conservation invariant must hold exactly after a real, production-reachable CLOG-releasing buy followed by a full exit"
         );
         assertLe(market.physicalInventory(), market.CURVE_ALLOCATION() + market.CLOG_ALLOCATION(), "physicalInventory must never legitimately exceed the fixed original physical supply");
@@ -358,15 +369,17 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
         uint256 prePhysicalInventory = market.physicalInventory();
+        uint256 preRewardVaultPool = rewardVault.unallocatedPool();
+        uint256 preRewardVaultClaim = manager.balanceOf(address(rewardVault), uint256(uint160(address(0))));
 
         vm.deal(address(this), buyAmount);
         vm.recordLogs(); // needed to read back clogExtracted - the CLOG-leg's own iterative
             // budget solver is intentionally NOT re-implemented independently here (that would
             // just duplicate _executeBudget); instead this test cross-checks that the
             // CONTRACT'S OWN emitted accounting (clogExtracted) is consistent with its own
-            // resulting state (pendingWithdrawals, winnerPotLiability, the conservation
-            // invariant) - a real, non-tautological check of internal consistency, distinct
-            // from independently re-deriving the iteration from first principles.
+            // resulting state (pendingWithdrawals, RewardVault's own unallocatedPool, the
+            // conservation invariant) - a real, non-tautological check of internal consistency,
+            // distinct from independently re-deriving the iteration from first principles.
         BalanceDelta swapDelta = _doSwap(true, -int256(buyAmount));
         (uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted) = _extractBoughtFieldsFromLogs();
 
@@ -393,11 +406,13 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
         assertEq(market.pendingWithdrawals(tickerOwner), expectedOwnerShare, "ticker owner's pending withdrawal must match the exact 40%-of-tax formula - the CLOG leg's own extraction never pays the ticker owner directly, only multisig/WinnerPot");
         assertEq(market.pendingWithdrawals(multisig), expectedTaxMultisigShare + expectedClogMultisigShare, "multisig's pending withdrawal must equal the tax-split share PLUS 10% of whatever the CLOG leg actually extracted this trade");
-        assertEq(market.winnerPotLiability(), expectedTaxWinnerPotShare + expectedClogWinnerPotShare, "WinnerPot's own liability accumulator must equal the tax-split residual PLUS 90% of whatever the CLOG leg actually extracted this trade");
+        uint256 expectedWinnerPotTotal = expectedTaxWinnerPotShare + expectedClogWinnerPotShare;
+        assertEq(rewardVault.unallocatedPool(), preRewardVaultPool + expectedWinnerPotTotal, "RewardVault's own unallocatedPool must grow by exactly the tax-split residual PLUS 90% of whatever the CLOG leg actually extracted - minted DIRECTLY to RewardVault now, never accumulated on the market at all");
+        assertEq(manager.balanceOf(address(rewardVault), uint256(uint160(address(0)))), preRewardVaultClaim + expectedWinnerPotTotal, "RewardVault's own real ERC6909 ETH claim must have grown by exactly winnerPotShare - a real, physical claim, not merely an accounting entry");
 
         // ── End-state invariant 3: the market's own ERC6909 claims match the economic result ─
         uint256 tokensOut = uint256(int256(swapDelta.amount1()));
-        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), buyAmount, "market's own ETH claim must equal the full gross input - the hook always mints the full specified amount");
+        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), buyAmount - expectedWinnerPotTotal, "market's own ETH claim must equal the gross input MINUS WinnerPot's own share - that share is minted DIRECTLY to RewardVault now, never touching the market's claim at all");
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(token)))),
             PHYSICAL_TOKEN_SUPPLY - tokensOut,
@@ -410,7 +425,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         //    liability bucket - no untracked "extra" balance, no double-counting. ──────────
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(0)))),
-            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig),
             "market's ETH claim must equal realETH + every liability bucket, exactly - the core conservation property this pass's tax split relies on"
         );
 
@@ -450,7 +465,8 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         uint256 preRealETH = market.realETH();
         uint256 preOwnerPending = market.pendingWithdrawals(tickerOwner);
         uint256 preMultisigPending = market.pendingWithdrawals(multisig);
-        uint256 preWinnerPotLiability = market.winnerPotLiability();
+        uint256 preRewardVaultPool = rewardVault.unallocatedPool();
+        uint256 preRewardVaultClaim = manager.balanceOf(address(rewardVault), uint256(uint160(address(0))));
         uint256 prePhysicalInventory = market.physicalInventory();
         uint256 preMarketTokenClaim = manager.balanceOf(address(market), uint256(uint160(address(token))));
         uint256 preMarketEthClaim = manager.balanceOf(address(market), uint256(uint160(address(0))));
@@ -476,17 +492,25 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
         assertEq(market.pendingWithdrawals(tickerOwner), preOwnerPending + expectedOwnerShare, "ticker owner's pending withdrawal must grow by exactly the 40%-of-sell-tax formula");
         assertEq(market.pendingWithdrawals(multisig), preMultisigPending + expectedMultisigShare, "multisig's pending withdrawal must grow by exactly the 10%-of-sell-tax formula");
-        assertEq(market.winnerPotLiability(), preWinnerPotLiability + expectedWinnerPotShare, "WinnerPot's own liability accumulator must grow by exactly the residual sell-tax share");
+        assertEq(rewardVault.unallocatedPool(), preRewardVaultPool + expectedWinnerPotShare, "RewardVault's own unallocatedPool must grow by exactly the sell-tax residual - minted DIRECTLY to RewardVault, never accumulated on the market");
+        assertEq(manager.balanceOf(address(rewardVault), uint256(uint160(address(0)))), preRewardVaultClaim + expectedWinnerPotShare, "RewardVault's own real ERC6909 ETH claim must have grown by exactly winnerPotShare");
         assertEq(market.realETH(), preRealETH - grossPayout, "realETH must fall by the full GROSS payout, not merely the net amount paid to the seller");
 
-        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), preMarketEthClaim - netEthOut, "market's own ETH claim must fall by exactly netEthOut (burned to pay the seller) - the conservation proof: reserve falls by grossPayout, liabilities rise by tax, net change is exactly netEthOut");
+        // CORRECTION: the market's own ETH claim must fall by netEthOut PLUS winnerPotShare, not
+        // merely netEthOut - the hook performs an EXTRA burn to move WinnerPot's own share out of
+        // the market's claim entirely (see ClogV4Hook.sol's own beforeSwap docs on the sell-side
+        // split): market claim BEFORE = realETH + ownerLiability + multisigLiability (no
+        // WinnerPot term at all); realETH falls by grossPayout, owner/multisig liabilities rise
+        // by their tax shares, so the claim must fall by exactly
+        // grossPayout - ownerShare - multisigShare = netEthOut + winnerPotShare.
+        assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), preMarketEthClaim - (netEthOut + expectedWinnerPotShare), "market's own ETH claim must fall by exactly netEthOut PLUS winnerPotShare - the conservation proof: reserve falls by grossPayout, owner/multisig liabilities rise by their shares, WinnerPot's share leaves the market's claim entirely rather than staying as a liability");
         assertEq(manager.balanceOf(address(market), uint256(uint160(address(token)))), preMarketTokenClaim + sellAmount, "market's own token claim must grow by exactly the tokens sold back in (minted from the router's real deposit)");
         assertEq(market.physicalInventory(), prePhysicalInventory + sellAmount, "physicalInventory must grow by exactly sellAmount - the sold-back tokens are real inventory again");
 
         // ── THE conservation invariant, same as the buy test - must hold after a sell too ───
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(0)))),
-            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig),
             "market's ETH claim must equal realETH + every liability bucket, exactly, after a sell too"
         );
 

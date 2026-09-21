@@ -46,7 +46,7 @@ contract FullSystemInvariantTest is Test {
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
 
-        vault = new RewardVault(address(rm));
+        vault = new RewardVault(address(rm), address(0), address(0));
         vm.prank(governance);
         rm.setRewardVault(address(vault));
 

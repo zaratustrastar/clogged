@@ -64,7 +64,7 @@ contract ChainlinkAdapterIntegrationTest is Test {
         provider.setRoundManager(address(rm));
         vm.deal(address(provider), 10 ether);
 
-        vault = new RewardVault(address(rm));
+        vault = new RewardVault(address(rm), address(0), address(0));
         vm.prank(governance);
         rm.setRewardVault(address(vault));
 

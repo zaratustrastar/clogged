@@ -19,12 +19,19 @@ interface IClogV4HookWithdrawal {
 ///         contract's pure state-transition functions from inside beforeSwap.
 ///
 /// @dev STILL DELIBERATELY DEFERRED, explicitly (not an oversight, and NOT to be described as
-///      "finished" until built): the real WinnerPot-share ETH routing mechanism (mint-to-
-///      RewardVault + recordWinnerPotClaim - both the trading-tax WinnerPot share and the
-///      CLOG-extraction WinnerPot share are still tracked as this contract's own
-///      winnerPotLiability accumulator for now, pending that separate integration piece);
-///      governance-adjustable targetExtractionBps/safetyFloorBps (this slice hardcodes the
-///      production defaults, 4_000/5_000, with no setter yet).
+///      "finished" until built): governance-adjustable targetExtractionBps/safetyFloorBps (this
+///      slice hardcodes the production defaults, 4_000/5_000, with no setter yet).
+///
+/// @dev WinnerPot's own share (both the trading-tax share and the CLOG-extraction share) is
+///      NEVER accumulated as state on this contract at all - applyBuy/applySell compute and
+///      RETURN it (folded into one combined winnerPotShare), but the hook is what actually
+///      routes it: minted DIRECTLY to RewardVault's own ERC6909 claim, with
+///      recordWinnerPotClaim called synchronously in the SAME transaction (see ClogV4Hook.sol's
+///      own beforeSwap and RewardVault.sol's own docs for the full claim-native flow and why it
+///      rules out a keeper-flush race). This market's own conservation invariant is therefore
+///      narrower than it used to be: market's ETH claim == realETH + pendingWithdrawals[owner] +
+///      pendingWithdrawals[multisig] - no WinnerPot term at all, since that ETH never touches
+///      this market's claim even momentarily.
 ///
 /// @dev NOW PORTED, this pass, verified against the exact production BondingCurveClog.sol
 ///      source (read directly before implementing, not from memory): dynamic ticker-owner
@@ -99,7 +106,6 @@ contract ClogMarket {
     uint256 public physicalInventory;
 
     mapping(address => uint256) public pendingWithdrawals; // pull-payment ledger, mirroring production's own _credit/withdraw exactly
-    uint256 public winnerPotLiability; // see contract-level docs on what's still deferred here
 
     event Bought(uint256 grossInput, uint256 tax, uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted, uint256 clogRetained, uint256 newRe, uint256 newRt);
     event Sold(uint256 tokensIn, uint256 grossPayout, uint256 tax, uint256 netEthOut, bool wasCapped, uint256 newRe, uint256 newRt);
@@ -164,8 +170,10 @@ contract ClogMarket {
 
         _credit(ticketOwnerRecipient(), ownerShare);
         _credit(multisig, multisigShare);
+        // winnerPotShare is returned (not accumulated here) - the hook mints it DIRECTLY to
+        // RewardVault's own ERC6909 claim and calls recordWinnerPotClaim synchronously in the
+        // same transaction, so it never touches this market's own claim or liabilities at all.
         winnerPotShare = taxWinnerPotShare + clogWinnerPotShare;
-        winnerPotLiability += winnerPotShare;
 
         emit Bought(grossInput, tax, curveTokens, clogTokens, clogExtracted, clogRetained, re, rt);
     }
@@ -296,7 +304,7 @@ contract ClogMarket {
             uint256 toMultisig = Math.mulDiv(extracted, MULTISIG_CLOG_BPS, BPS);
             winnerPotPortion = extracted - toMultisig;
             _credit(multisig, toMultisig);
-            // winnerPotPortion is returned, added to winnerPotLiability by the caller (applyBuy) -
+            // winnerPotPortion is returned, folded into applyBuy's own overall winnerPotShare -
             // see contract-level docs on why this stays a tracked liability, not a real route, for now.
         }
     }
@@ -341,7 +349,7 @@ contract ClogMarket {
 
         _credit(ticketOwnerRecipient(), ownerShare);
         _credit(multisig, multisigShare);
-        winnerPotLiability += winnerPotShare;
+        // winnerPotShare is returned (not accumulated here) - see applyBuy's own docs above for why.
 
         emit Sold(tokensIn, grossPayout, tax, netEthOut, wasCapped, re, rt);
     }

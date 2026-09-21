@@ -28,7 +28,7 @@ contract RewardVaultTest is Test {
     }
 
     function setUp() public {
-        vault = new RewardVault(address(this)); // test contract acts as RoundManager
+        vault = new RewardVault(address(this), address(0), address(0)); // test contract acts as RoundManager; v4 wiring disabled for this suite
         market = new MockMarket("Cat", "CAT");
         token = market.token();
     }

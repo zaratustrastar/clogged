@@ -13,6 +13,7 @@ import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
+import {RewardVault} from "../src/RewardVault.sol";
 
 /// @notice A contract with no receive()/fallback - any plain ETH send to it must revert. Used
 ///         to prove withdraw()'s atomicity when the recipient itself cannot accept ETH.
@@ -25,6 +26,7 @@ contract DynamicOwnerAndWithdrawalTest is Test, IUnlockCallback {
     ClogMarket market;
     MinimalMockToken token;
     MockTickerNFT tickerNFT;
+    RewardVault rewardVault;
     PoolKey key;
 
     address ownerA = makeAddr("ownerA");
@@ -44,6 +46,9 @@ contract DynamicOwnerAndWithdrawalTest is Test, IUnlockCallback {
         ClogV4Hook impl = new ClogV4Hook(IPoolManager(address(manager)), address(this));
         vm.etch(HOOK_ADDRESS, address(impl).code);
         hook = ClogV4Hook(HOOK_ADDRESS);
+
+        rewardVault = new RewardVault(address(this), address(manager), HOOK_ADDRESS);
+        hook.setRewardVault(address(rewardVault));
 
         tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(TICKER_TOKEN_ID, ownerA);
@@ -110,7 +115,7 @@ contract DynamicOwnerAndWithdrawalTest is Test, IUnlockCallback {
     function _conservationHolds() internal view {
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(0)))),
-            market.realETH() + market.pendingWithdrawals(market.ticketOwnerRecipient()) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            market.realETH() + market.pendingWithdrawals(market.ticketOwnerRecipient()) + market.pendingWithdrawals(multisig),
             "conservation invariant must hold"
         );
     }

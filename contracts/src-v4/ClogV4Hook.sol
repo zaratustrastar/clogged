@@ -11,6 +11,14 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {ClogMarket} from "./ClogMarket.sol";
 
+/// @notice Minimal interface into RewardVault's own accounting hook - kept separate from
+///         importing RewardVault.sol directly to avoid pulling its full dependency graph
+///         (ReentrancyGuard, Math, its own v4-core imports) into this contract's compilation
+///         unit just for one function call.
+interface IRewardVaultRecorder {
+    function recordWinnerPotClaim(uint256 amount) external;
+}
+
 /// @title ClogV4Hook (first vertical-slice version)
 /// @notice Universal v4 execution adapter - pure v4 mechanics, no per-ticker economic state of
 ///         its own (see ClogMarket.sol). One instance shared by every CLOG ticker's pool.
@@ -43,11 +51,23 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
 
     IPoolManager public immutable poolManager;
     address public immutable launchInitializer; // TickerRegistry (or equivalent) - the only caller allowed to registerMarket
+    address public rewardVault; // WinnerPot's own claim-native destination - see beforeSwap's mint-split.
+        // NOT immutable and NOT a constructor param, deliberately: RewardVault's own constructor
+        // needs this hook's address (to authenticate recordWinnerPotClaim), so requiring this
+        // hook to already know RewardVault's address at construction time would create a
+        // circular CREATE/CREATE2 dependency - especially fragile here since this hook's own
+        // address must additionally satisfy CREATE2 permission-bit mining. Deployment order
+        // instead: mine/deploy this hook -> deploy RewardVault(roundManager, poolManager,
+        // address(thisHook)) -> call setRewardVault(rewardVault) here exactly once -> only then
+        // is registerMarket/trading permitted (both check rewardVault != address(0) below). This
+        // is one-time deployment initialization, not ongoing upgradeability: there is no path to
+        // change it again afterward.
 
     mapping(PoolId => address) public marketOf;
     mapping(address => PoolId) public poolOf; // reverse relationship - a market may be registered to at most one pool, ever
 
     event MarketRegistered(PoolId indexed poolId, address indexed market);
+    event RewardVaultConfigured(address indexed rewardVault);
 
     modifier onlyPoolManager() {
         require(msg.sender == address(poolManager), "not pool manager");
@@ -58,6 +78,18 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
         require(address(poolManager_) != address(0) && launchInitializer_ != address(0), "zero address");
         poolManager = poolManager_;
         launchInitializer = launchInitializer_;
+    }
+
+    /// @notice One-time deployment initialization, called exactly once after RewardVault has
+    ///         been deployed (which itself needed this hook's address already) - breaks the
+    ///         constructor cycle described above. Deliberately NOT governance-updatable: no
+    ///         function anywhere changes rewardVault after this succeeds once.
+    function setRewardVault(address rewardVault_) external {
+        require(msg.sender == launchInitializer, "not launch initializer");
+        require(rewardVault_ != address(0), "zero reward vault");
+        require(rewardVault == address(0), "already configured");
+        rewardVault = rewardVault_;
+        emit RewardVaultConfigured(rewardVault_);
     }
 
     /// @notice Registers the market for a not-yet-initialized pool. Callable once per poolId,
@@ -83,6 +115,7 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
     ///          one market, one pool, permanently.
     function registerMarket(PoolKey calldata key, address market) external {
         require(msg.sender == launchInitializer, "not launch initializer");
+        require(rewardVault != address(0), "reward vault not configured");
         require(market != address(0), "zero market");
         require(address(key.hooks) == address(this), "PoolKey hook mismatch");
         require(Currency.unwrap(key.currency0) == address(0), "currency0 must be native ETH");
@@ -122,6 +155,11 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
         // this swap is running against, matching the registry populated at launch.
         address market = marketOf[key.toId()];
         require(market != address(0), "unknown market");
+        // Defense in depth: registerMarket already refuses to run until rewardVault is
+        // configured, so no market could exist yet if this were ever false in practice - kept
+        // here anyway so beforeSwap's own requirements are self-evident without having to trace
+        // registerMarket's ordering to see why this is always safe.
+        require(rewardVault != address(0), "reward vault not configured");
 
         require(params.amountSpecified < 0, "only exact input supported in this slice");
         uint256 specifiedAmount = uint256(-params.amountSpecified);
@@ -134,23 +172,41 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
 
         if (buyingToken) {
             (uint256 tokensOut, uint256 winnerPotShare) = ClogMarket(market).applyBuy(specifiedAmount);
-            winnerPotShare; // not yet routed anywhere separately - see ClogMarket's own docs on
-                // what's still deferred; the full specifiedAmount minted below already covers
-                // it as part of the market's own overall claim, tracked internally by the
-                // market's own winnerPotLiability accumulator.
-            // Hook temporarily goes negative ETH (it just minted the market a claim for the
-            // full specified input) and positive token (it just burned the market's own
-            // pre-existing token claim to cover tokensOut) - see contract-level docs for why
-            // the BeforeSwapDelta returned below must exactly cancel this.
-            poolManager.mint(market, _currencyId(key.currency0), specifiedAmount);
+            // CLAIM-NATIVE WinnerPot SPLIT: the market receives only the portion backing its own
+            // realETH + owner/multisig liabilities; WinnerPot's own share is minted DIRECTLY to
+            // RewardVault's own ERC6909 claim, never touching the market's claim at all, with
+            // recordWinnerPotClaim called SYNCHRONOUSLY in this same transaction so a later,
+            // separate allocateRound() call is guaranteed to see it (see RewardVault.sol's own
+            // docs on why this rules out a keeper-flush race entirely).
+            uint256 marketPortion = specifiedAmount - winnerPotShare;
+            poolManager.mint(market, _currencyId(key.currency0), marketPortion);
+            if (winnerPotShare > 0) {
+                poolManager.mint(rewardVault, _currencyId(key.currency0), winnerPotShare);
+                IRewardVaultRecorder(rewardVault).recordWinnerPotClaim(winnerPotShare);
+            }
+            // Hook temporarily goes negative ETH (it just minted marketPortion+winnerPotShare,
+            // together summing to the full specified input, across the market and RewardVault)
+            // and positive token (it just burned the market's own pre-existing token claim to
+            // cover tokensOut) - see contract-level docs for why the BeforeSwapDelta returned
+            // below must exactly cancel this: it only ever references specifiedAmount as a
+            // whole, so splitting who receives it makes no difference to that cancellation.
             poolManager.burn(market, _currencyId(key.currency1), tokensOut);
             unspecifiedAmount = tokensOut;
         } else {
             (uint256 netEthOut, uint256 winnerPotShare, bool wasCapped) = ClogMarket(market).applySell(specifiedAmount);
-            winnerPotShare; // same as above - deferred routing, already covered by the market's own tracking
             wasCapped; // informational only in this slice - not yet surfaced to the router/event layer
             poolManager.mint(market, _currencyId(key.currency1), specifiedAmount);
             poolManager.burn(market, _currencyId(key.currency0), netEthOut);
+            // Same claim-native split as the buy side above: the market's own ETH claim must
+            // never retain WinnerPot's share, so an EXTRA, independent burn+mint pair (self-
+            // cancelling for the hook's own delta, entirely separate from the
+            // specifiedAmount/unspecifiedAmount pair the BeforeSwapDelta below accounts for)
+            // moves exactly winnerPotShare from the market straight to RewardVault.
+            if (winnerPotShare > 0) {
+                poolManager.burn(market, _currencyId(key.currency0), winnerPotShare);
+                poolManager.mint(rewardVault, _currencyId(key.currency0), winnerPotShare);
+                IRewardVaultRecorder(rewardVault).recordWinnerPotClaim(winnerPotShare);
+            }
             unspecifiedAmount = netEthOut;
         }
 

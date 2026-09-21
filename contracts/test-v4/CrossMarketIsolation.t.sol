@@ -13,6 +13,7 @@ import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
+import {RewardVault} from "../src/RewardVault.sol";
 
 /// @title P0 cross-market isolation
 /// @notice Every ClogMarket approves the SAME universal hook, so PoolManager's own ERC6909
@@ -24,6 +25,7 @@ import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 contract CrossMarketIsolationTest is Test, IUnlockCallback {
     PoolManager manager;
     ClogV4Hook hook;
+    RewardVault rewardVault;
 
     ClogMarket marketA;
     MinimalMockToken tokenA;
@@ -55,6 +57,9 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
         ClogV4Hook impl = new ClogV4Hook(IPoolManager(address(manager)), address(this));
         vm.etch(HOOK_ADDRESS, address(impl).code);
         hook = ClogV4Hook(HOOK_ADDRESS);
+
+        rewardVault = new RewardVault(address(this), address(manager), HOOK_ADDRESS);
+        hook.setRewardVault(address(rewardVault));
 
         tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(1, tickerOwner);

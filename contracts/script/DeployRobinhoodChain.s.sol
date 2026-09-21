@@ -144,7 +144,7 @@ contract DeployRobinhoodChain is Script {
         d.engine.setRoundManager(address(d.roundManager));
         d.randomnessProvider.setRoundManager(address(d.roundManager));
 
-        d.rewardVault = new RewardVault(address(d.roundManager));
+        d.rewardVault = new RewardVault(address(d.roundManager), address(0), address(0)); // v4 wiring not yet part of this deploy script - see contracts-branch docs
 
         // TickerNFT/TickerRegistry circular dependency, same one-time-setter pattern used
         // throughout: deploy TickerNFT first (deployer authorized to initialize it once), deploy

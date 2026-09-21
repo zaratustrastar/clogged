@@ -12,6 +12,7 @@ import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
+import {RewardVault} from "../src/RewardVault.sol";
 
 /// @notice registerMarket must not rely on the launch initializer being honest - it validates
 ///         the actual PoolKey/market relationship directly, so even an AUTHORIZED but malformed
@@ -21,6 +22,7 @@ import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 contract MarketRegistrationTest is Test {
     PoolManager manager;
     ClogV4Hook hook;
+    RewardVault rewardVault;
 
     address constant HOOK_ADDRESS = address(0x2088); // see ClogV4HookBuySell.t.sol for the flag derivation
     address tickerOwner = makeAddr("tickerOwner");
@@ -37,6 +39,8 @@ contract MarketRegistrationTest is Test {
         ClogV4Hook impl = new ClogV4Hook(IPoolManager(address(manager)), address(this));
         vm.etch(HOOK_ADDRESS, address(impl).code);
         hook = ClogV4Hook(HOOK_ADDRESS);
+        rewardVault = new RewardVault(address(this), address(manager), HOOK_ADDRESS);
+        hook.setRewardVault(address(rewardVault));
         tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(TICKER_TOKEN_ID, tickerOwner);
     }
@@ -119,5 +123,52 @@ contract MarketRegistrationTest is Test {
 
         assertEq(hook.marketOf(key.toId()), address(m), "marketOf must resolve to the registered market");
         assertEq(PoolId.unwrap(hook.poolOf(address(m))), PoolId.unwrap(key.toId()), "poolOf must resolve back to the exact same pool - the reverse relationship must hold");
+    }
+
+    // ── Deployment-initialization gate: registerMarket must reject until rewardVault is set ──
+
+    function test_registerMarket_revertsIfRewardVaultNotConfigured() public {
+        // A fresh hook that has NOT had setRewardVault called yet at all.
+        address freshHookAddress = address(0x3099);
+        ClogV4Hook freshImpl = new ClogV4Hook(IPoolManager(address(manager)), address(this));
+        vm.etch(freshHookAddress, address(freshImpl).code);
+        ClogV4Hook freshHook = ClogV4Hook(freshHookAddress);
+
+        MinimalMockToken t = new MinimalMockToken();
+        ClogMarket m = new ClogMarket(freshHookAddress, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        PoolKey memory key =
+            PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(freshHookAddress)});
+
+        vm.expectRevert(bytes("reward vault not configured"));
+        freshHook.registerMarket(key, address(m));
+    }
+
+    // ── setRewardVault's own one-time-initialization semantics ───────────────────────────────
+
+    function test_setRewardVault_onlyLaunchInitializer_reverts() public {
+        address notInitializer = makeAddr("notInitializer");
+        vm.prank(notInitializer);
+        vm.expectRevert(bytes("not launch initializer"));
+        hook.setRewardVault(address(rewardVault));
+    }
+
+    function test_setRewardVault_zeroAddress_reverts() public {
+        address freshHookAddress = address(0x3099);
+        ClogV4Hook freshImpl = new ClogV4Hook(IPoolManager(address(manager)), address(this));
+        vm.etch(freshHookAddress, address(freshImpl).code);
+        vm.expectRevert(bytes("zero reward vault"));
+        ClogV4Hook(freshHookAddress).setRewardVault(address(0));
+    }
+
+    function test_setRewardVault_callableExactlyOnce_secondCallReverts() public {
+        // `hook` (HOOK_ADDRESS) already had setRewardVault called once in setUp() - a second
+        // call, even with a different, otherwise-valid address, must revert: this is one-time
+        // deployment initialization, never ongoing upgradeability.
+        RewardVault anotherVault = new RewardVault(address(this), address(manager), HOOK_ADDRESS);
+        vm.expectRevert(bytes("already configured"));
+        hook.setRewardVault(address(anotherVault));
+
+        // The original configuration must be completely unchanged after the reverted attempt.
+        assertEq(hook.rewardVault(), address(rewardVault), "rewardVault must remain exactly what setUp() originally configured");
     }
 }
