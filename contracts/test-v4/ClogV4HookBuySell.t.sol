@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
@@ -43,6 +44,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     // BPS(10_000) = 1.8B - a PRICING reserve only, deliberately "deeper" than real supply so
     // the curve behaves correctly. NEVER how many real MemeTokens exist.
     uint256 constant VIRTUAL_TOKEN_SEED = 1_800_000_000e18;
+    uint256 constant BUFFER_MULTIPLIER_BPS = 20_000; // Config G - produces VIRTUAL_TOKEN_SEED above, matching production's own derivation
     // MemeToken.TOTAL_SUPPLY exactly - the real, physical amount that ever gets minted (900M
     // curve allocation + 100M CLOG allocation, undifferentiated in this vertical slice since
     // the CLOG leg itself isn't ported yet - see ClogMarket.sol's own docs).
@@ -68,7 +70,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // need re-establishing, which registerMarket (below) does fresh regardless.
 
         token = new MinimalMockToken();
-        market = new ClogMarket(HOOK_ADDRESS, address(token), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), tickerOwner, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
 
         key = PoolKey({
             currency0: Currency.wrap(address(0)), // native ETH
@@ -173,6 +175,21 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
     receive() external payable {}
 
+    /// @dev Reads curveTokens/clogTokens/clogExtracted back out of the most recent
+    ///      ClogMarket.Bought event recorded by vm.recordLogs() - all 8 of Bought's fields are
+    ///      non-indexed, so they're packed together in the log's data as 8 uint256 words.
+    function _extractBoughtFieldsFromLogs() internal returns (uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted) {
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 boughtTopic = keccak256("Bought(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)");
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].emitter == address(market) && entries[i].topics.length > 0 && entries[i].topics[0] == boughtTopic) {
+                (, , uint256 curve, uint256 clog, uint256 extracted, , ,) = abi.decode(entries[i].data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256));
+                return (curve, clog, extracted);
+            }
+        }
+        revert("Bought event not found in recorded logs");
+    }
+
     // ── Physical-vs-virtual sanity (the P0 fix this pass) ────────────────────────────────────
 
     function test_initialPhysicalInventory_isExactlyOneBillion_notVirtualSeed() public view {
@@ -222,15 +239,17 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
     // ── The actual proof ─────────────────────────────────────────────────────────────────────
 
-    function test_sellSolvencyCap_neverPaysOutMoreThanRealETH() public {
-        // Build up a small amount of genuine realETH via a real buy, then sell a MUCH larger
-        // token position than that one buy could ever have produced - representing tokens
-        // accumulated from other buyers/sources over time, now being exited all at once. A
-        // simple buy-then-sell-what-you-just-bought round trip can never trigger the cap on
-        // its own (constant-product AMMs are self-consistent for that exact case, verified
-        // directly by simulation before writing this test) - the cap exists specifically for
-        // when the curve's own ideal payout, for a position larger than this market's own
-        // realETH can cover, would otherwise promise more than is actually, really held.
+    function test_ARTIFICIAL_sellSolvencyCap_mechanismOnly_notProductionReachable() public {
+        // ⚠️ ARTIFICIAL SCENARIO - NOT a production-reachable state. This creates an extra 50M
+        // tokens via MinimalMockToken.mint() AFTER the fixed 1B physical supply already exists;
+        // real MemeToken has a fixed 1B total supply and no second mint path, so a position this
+        // large could never legitimately exist. This test exists ONLY to exercise the cap
+        // mechanism's own branch logic in isolation (does it cap correctly, does realETH fall to
+        // exactly zero, does the conservation invariant still hold) - it must NEVER be cited as
+        // proof that a legitimate production state can trigger the cap. See
+        // test_realCLOGExtraction_canLegitimatelyDepleteRealETH_belowIdealSellPayout below for
+        // the production-valid version, reachable using only the fixed 1B supply and real CLOG
+        // extraction/reserve depletion, once the CLOG leg existed to make that possible.
         uint256 buyAmount = 0.01 ether;
         vm.deal(address(this), buyAmount);
         _doSwap(true, -int256(buyAmount));
@@ -260,6 +279,71 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         );
     }
 
+    function test_realCLOGExtraction_canLegitimatelyDepleteRealETH_belowIdealSellPayout() public {
+        // PRODUCTION-VALID cap scenario, using ONLY the fixed 1B physical supply and real buy()/
+        // sell() flows - no out-of-band minting anywhere in this test. This is WHY the cap
+        // exists economically, not merely a branch to exercise: a single buy large enough to
+        // trigger a CLOG-leg release delivers BOTH curve tokens and CLOG tokens, but
+        // targetExtractionBps (40% by default) immediately pulls part of the CLOG leg's own
+        // backing back out as extracted revenue - the CLOG tokens themselves remain fully
+        // circulating and sellable regardless. Selling back that ENTIRE combined position
+        // therefore implies, via the curve's own math, more ETH than what extraction has left
+        // as realETH - a real, legitimate gap, not a contrived one. Verified by direct
+        // simulation before writing this test (see this pass's own working notes) that one buy
+        // of this size is already sufficient - no artificial minting, no unrealistic repeated-
+        // trade sequence required.
+        uint256 buyAmount = 0.05 ether;
+        vm.deal(address(this), buyAmount);
+        vm.recordLogs();
+        BalanceDelta buyDelta = _doSwap(true, -int256(buyAmount));
+        (uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted) = _extractBoughtFieldsFromLogs();
+        uint256 totalTokensHeld = uint256(int256(buyDelta.amount1()));
+
+        assertEq(totalTokensHeld, curveTokens + clogTokens, "sanity: the swap's own token delta must equal the sum of both legs");
+        assertGt(clogTokens, 0, "sanity: this buy must have actually triggered a real CLOG-leg release, or this test proves nothing about the CLOG leg's own effect");
+        assertGt(clogExtracted, 0, "sanity: this buy's CLOG release must have actually triggered real extraction, or the cap has nothing to do with CLOG activity in this run");
+
+        uint256 realETHBeforeSell = market.realETH();
+
+        // Sell back the ENTIRE real position, accumulated purely from the one real buy above.
+        BalanceDelta sellDelta = _doSwap(false, -int256(totalTokensHeld));
+        uint256 netEthOut = uint256(int256(sellDelta.amount0()));
+
+        assertTrue(market.realETH() == 0 || netEthOut > 0, "sanity: the sell must have produced a coherent result either way");
+        assertLe(netEthOut, realETHBeforeSell, "the net payout can never exceed what was actually, really held before the sell - the CLOG leg's own extraction is precisely what makes this a legitimately reachable production state, not merely a theoretical one");
+        assertEq(market.realETH(), 0, "the cap must have genuinely fired on this real, production-reachable sequence - realETH falling to EXACTLY zero (not merely small) is the unambiguous signature of a capped payout, proving this is not just a weak inequality that happens to pass");
+
+        // The conservation invariant must hold exactly, using only a real, production-reachable
+        // sequence of trades.
+        assertEq(
+            manager.balanceOf(address(market), uint256(uint160(address(0)))),
+            market.realETH() + market.pendingWithdrawals(tickerOwner) + market.pendingWithdrawals(multisig) + market.winnerPotLiability(),
+            "the conservation invariant must hold exactly after a real, production-reachable CLOG-releasing buy followed by a full exit"
+        );
+        assertLe(market.physicalInventory(), market.CURVE_ALLOCATION() + market.CLOG_ALLOCATION(), "physicalInventory must never legitimately exceed the fixed original physical supply");
+    }
+
+    function test_physicalInventory_neverExceedsFixedOriginalSupply_acrossMultipleRoundTrips() public {
+        uint256 fixedSupply = market.CURVE_ALLOCATION() + market.CLOG_ALLOCATION();
+        assertEq(market.physicalInventory(), fixedSupply, "sanity: must start at exactly the fixed original supply");
+
+        uint256 buyAmount = 0.02 ether;
+        vm.deal(address(this), buyAmount * 3);
+
+        for (uint256 i = 0; i < 3; i++) {
+            BalanceDelta buyDelta = _doSwap(true, -int256(buyAmount));
+            uint256 tokensHeld = uint256(int256(buyDelta.amount1()));
+            assertLe(market.physicalInventory(), fixedSupply, "physicalInventory must never exceed the fixed original supply after a buy");
+
+            _doSwap(false, -int256(tokensHeld));
+            assertLe(market.physicalInventory(), fixedSupply, "physicalInventory must never exceed the fixed original supply after a sell either");
+        }
+
+        // A full round trip (sell back exactly what was bought, each time) must return
+        // physicalInventory to EXACTLY its starting value - nothing created, nothing destroyed.
+        assertEq(market.physicalInventory(), fixedSupply, "after three full buy-then-sell-everything round trips, physicalInventory must return to exactly the fixed original supply");
+    }
+
     function test_realBuy_everyDeltaZero_marketStateCorrect() public {
         uint256 marketClaimAfterSetup = manager.balanceOf(address(market), uint256(uint160(address(token))));
         assertEq(marketClaimAfterSetup, PHYSICAL_TOKEN_SUPPLY, "sanity: market must hold its full REAL (physical) token claim right after setUp's deposit step, never the virtual seed");
@@ -268,11 +352,18 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
-        uint256 preRealETH = market.realETH();
         uint256 prePhysicalInventory = market.physicalInventory();
 
         vm.deal(address(this), buyAmount);
+        vm.recordLogs(); // needed to read back clogExtracted - the CLOG-leg's own iterative
+            // budget solver is intentionally NOT re-implemented independently here (that would
+            // just duplicate _executeBudget); instead this test cross-checks that the
+            // CONTRACT'S OWN emitted accounting (clogExtracted) is consistent with its own
+            // resulting state (pendingWithdrawals, winnerPotLiability, the conservation
+            // invariant) - a real, non-tautological check of internal consistency, distinct
+            // from independently re-deriving the iteration from first principles.
         BalanceDelta swapDelta = _doSwap(true, -int256(buyAmount));
+        (uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted) = _extractBoughtFieldsFromLogs();
 
         // ── End-state invariant 1: the unlock succeeded at all ──────────────────────────────
         // (PoolManager.unlock() itself reverts with CurrencyNotSettled if any nonzero delta
@@ -286,13 +377,18 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         uint256 expectedTax = (buyAmount * market.BUY_TAX_BPS()) / market.BPS();
         uint256 expectedBudget = buyAmount - expectedTax;
         uint256 expectedOwnerShare = (expectedTax * market.TICKER_OWNER_TAX_BPS()) / market.BPS();
-        uint256 expectedMultisigShare = (expectedTax * market.MULTISIG_TAX_BPS()) / market.BPS();
-        uint256 expectedWinnerPotShare = expectedTax - expectedOwnerShare - expectedMultisigShare;
+        uint256 expectedTaxMultisigShare = (expectedTax * market.MULTISIG_TAX_BPS()) / market.BPS();
+        uint256 expectedTaxWinnerPotShare = expectedTax - expectedOwnerShare - expectedTaxMultisigShare;
 
-        assertEq(market.pendingWithdrawals(tickerOwner), expectedOwnerShare, "ticker owner's pending withdrawal must match the exact 40%-of-tax formula");
-        assertEq(market.pendingWithdrawals(multisig), expectedMultisigShare, "multisig's pending withdrawal must match the exact 10%-of-tax formula");
-        assertEq(market.winnerPotLiability(), expectedWinnerPotShare, "WinnerPot's own liability accumulator must match the exact residual (tax - owner - multisig)");
-        assertEq(market.realETH(), preRealETH + expectedBudget, "realETH must advance by exactly the POST-TAX budget, not the full gross input");
+        // The CLOG leg's own extraction, when it fires, ALSO credits multisig/WinnerPot (10%/90%
+        // of clogExtracted, per production's own split) - additive on top of the trading-tax
+        // shares above, cross-checked against the contract's own emitted clogExtracted.
+        uint256 expectedClogMultisigShare = (clogExtracted * market.MULTISIG_CLOG_BPS()) / market.BPS();
+        uint256 expectedClogWinnerPotShare = clogExtracted - expectedClogMultisigShare;
+
+        assertEq(market.pendingWithdrawals(tickerOwner), expectedOwnerShare, "ticker owner's pending withdrawal must match the exact 40%-of-tax formula - the CLOG leg's own extraction never pays the ticker owner directly, only multisig/WinnerPot");
+        assertEq(market.pendingWithdrawals(multisig), expectedTaxMultisigShare + expectedClogMultisigShare, "multisig's pending withdrawal must equal the tax-split share PLUS 10% of whatever the CLOG leg actually extracted this trade");
+        assertEq(market.winnerPotLiability(), expectedTaxWinnerPotShare + expectedClogWinnerPotShare, "WinnerPot's own liability accumulator must equal the tax-split residual PLUS 90% of whatever the CLOG leg actually extracted this trade");
 
         // ── End-state invariant 3: the market's own ERC6909 claims match the economic result ─
         uint256 tokensOut = uint256(int256(swapDelta.amount1()));
@@ -322,9 +418,10 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         assertEq(manager.balanceOf(address(this), uint256(uint160(address(token)))), 0, "the router took REAL tokens, not a claim - no claim balance should exist for the router");
 
         // ── End-state invariant 6: ClogMarket's own curve state updated exactly once, correctly ─
-        assertEq(market.re(), preRe + expectedBudget, "curve re must have advanced by exactly the POST-TAX budget, matching production's own budget/tax split exactly");
+        assertEq(market.re(), preRe + expectedBudget - clogExtracted, "curve re must have advanced by exactly the post-tax budget MINUS whatever the CLOG leg extracted back out as revenue - dust (if any) is folded into budget's own accounting since it's added directly to backing, never re-solved as more tokens");
         assertGt(tokensOut, 0, "must have actually received tokens");
-        assertEq(market.sold(), tokensOut, "market's own sold counter must match what was actually delivered");
+        assertEq(tokensOut, curveTokens + clogTokens, "sanity: the swap's own token delta must equal the sum of both legs, exactly as the event reported them");
+        assertEq(market.sold(), curveTokens, "market's own sold counter tracks the CURVE leg ONLY (leg-1), matching production's own semantics exactly - CLOG-leg deliveries never increment it, they advance hwm instead");
         assertEq(market.k(), market.re() * market.rt(), "k must be re-anchored to the CURRENT (re, rt) exactly after the trade, matching production's own re-anchor");
     }
 

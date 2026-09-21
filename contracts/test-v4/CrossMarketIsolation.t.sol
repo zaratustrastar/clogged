@@ -40,6 +40,7 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
     // Config G's own virtualTokenSeed - a PRICING reserve only, never real token count (see
     // ClogV4HookBuySell.t.sol's own docs for the full derivation).
     uint256 constant VIRTUAL_TOKEN_SEED = 1_800_000_000e18;
+    uint256 constant BUFFER_MULTIPLIER_BPS = 20_000;
     // MemeToken.TOTAL_SUPPLY exactly - what actually gets minted, deposited, and claimed.
     uint256 constant PHYSICAL_TOKEN_SUPPLY = 1_000_000_000e18;
 
@@ -59,7 +60,7 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
 
     function _setUpMarket(string memory label, bool isMarketA) internal returns (ClogMarket m, MinimalMockToken t, PoolKey memory k) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
         k = PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
 
         hook.registerMarket(k, address(m));
