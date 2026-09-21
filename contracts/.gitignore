@@ -1,6 +1,8 @@
 # Foundry build artifacts (regenerate with `forge build`)
 out/
 cache/
+out-v4/
+cache-v4/
 
 # npm dependencies (regenerate with `npm install`)
 node_modules/

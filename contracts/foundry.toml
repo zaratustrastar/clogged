@@ -7,3 +7,20 @@ via_ir = true
 optimizer = true
 optimizer_runs = 200
 gas_limit = 9223372036854775807
+
+# Separate profile for v4-core-integrated contracts (ClogMarket, the universal ClogV4Hook, and
+# their tests) - v4-core's PoolManager.sol pins pragma solidity EXACTLY 0.8.26, incompatible
+# with the default profile's pinned 0.8.24 static binary. No solc pin here at all: Foundry
+# auto-selects per file from its own local SVM cache (~/.svm/0.8.24, ~/.svm/0.8.26 - both
+# already present), so this needs no network access to resolve. Existing production contracts
+# are untouched and continue building under [profile.default] exactly as before.
+[profile.v4]
+src = "src-v4"
+test = "test-v4"
+out = "out-v4"
+libs = ["lib"]
+solc = "/tmp/solc-0.8.26"
+via_ir = true
+optimizer = true
+optimizer_runs = 200
+gas_limit = 9223372036854775807
