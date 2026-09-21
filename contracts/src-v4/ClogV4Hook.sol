@@ -19,6 +19,12 @@ interface IRewardVaultRecorder {
     function recordWinnerPotClaim(uint256 amount) external;
 }
 
+/// @notice Minimal ERC20 interface for reading the market's balance during the launch-time
+///         inventory deposit - see unlockCallback's REQUEST_DEPOSIT branch.
+interface IERC20Like {
+    function balanceOf(address account) external view returns (uint256);
+}
+
 /// @title ClogV4Hook (first vertical-slice version)
 /// @notice Universal v4 execution adapter - pure v4 mechanics, no per-ticker economic state of
 ///         its own (see ClogMarket.sol). One instance shared by every CLOG ticker's pool.
@@ -241,28 +247,70 @@ contract ClogV4Hook is IHooks, IUnlockCallback {
     ///         market whose own claim gets burned, never an arbitrary caller naming an arbitrary
     ///         market/amount, since this hook holds blanket per-currency ERC6909 approval from
     ///         every registered market and that trust must never be redirectable by anyone else.
+    uint8 internal constant REQUEST_WITHDRAWAL = 1;
+    uint8 internal constant REQUEST_DEPOSIT = 2;
+
     function executeWithdrawal(address to, uint256 amount) external {
         require(PoolId.unwrap(poolOf[msg.sender]) != bytes32(0), "not a registered market");
         require(to != address(0), "zero recipient");
         require(amount > 0, "zero amount");
-        poolManager.unlock(abi.encode(msg.sender, to, amount));
+        poolManager.unlock(abi.encode(REQUEST_WITHDRAWAL, abi.encode(msg.sender, to, amount)));
     }
 
-    /// @notice IUnlockCallback - exclusively reached via executeWithdrawal above (the swap
-    ///         flow's own unlock() call is made by the ROUTER, never by this hook, so this is
-    ///         never invoked mid-swap). Burns exactly `amount` of `market`'s own ETH claim and
-    ///         takes the same amount out as real native ETH directly to `to` - burn (+amount
-    ///         delta for this hook) and take (-amount delta) cancel exactly, leaving a net-zero
-    ///         delta with no separate sync/settle step needed here, unlike a swap where an
-    ///         external router settles its own side. take() itself reverts
-    ///         (NativeTransferFailed) if `to` cannot receive the ETH, which reverts this entire
-    ///         call atomically - the liability ClogMarket.withdraw already cleared is restored
-    ///         along with everything else, never silently lost.
+    /// @notice Part of the atomic launch sequence (see TickerRegistryV4.sol's own _launchMeme):
+    ///         deposits `market`'s ENTIRE real token balance (the full physical supply
+    ///         MemeToken.setMarket just minted to it) into PoolManager and mints the market a
+    ///         matching ERC6909 claim for exactly that amount, in one unlock() round-trip.
+    ///         Restricted to launchInitializer - the same authorization boundary as
+    ///         registerMarket, since this is part of the same trusted, one-time launch flow, and
+    ///         the actual token movement itself is further gated by ClogMarket's own onlyHook
+    ///         check on depositInventoryTo (this function calls it as the hook, the only caller
+    ///         that function accepts).
+    function depositMarketInventory(address market, address tokenAddress, PoolKey calldata key) external {
+        require(msg.sender == launchInitializer, "not launch initializer");
+        require(marketOf[key.toId()] == market, "market/key mismatch");
+        poolManager.unlock(abi.encode(REQUEST_DEPOSIT, abi.encode(market, tokenAddress, key)));
+    }
+
+    /// @notice IUnlockCallback - exclusively reached via executeWithdrawal or
+    ///         depositMarketInventory above (the swap flow's own unlock() call is made by the
+    ///         ROUTER, never by this hook, so this is never invoked mid-swap). A single leading
+    ///         kind byte discriminates the two request shapes.
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == address(poolManager), "not pool manager");
-        (address market, address to, uint256 amount) = abi.decode(data, (address, address, uint256));
-        poolManager.burn(market, _currencyId(Currency.wrap(address(0))), amount);
-        poolManager.take(Currency.wrap(address(0)), to, amount);
+        (uint8 kind, bytes memory inner) = abi.decode(data, (uint8, bytes));
+
+        if (kind == REQUEST_WITHDRAWAL) {
+            // Burns exactly `amount` of `market`'s own ETH claim and takes the same amount out
+            // as real native ETH directly to `to` - burn (+amount delta for this hook) and take
+            // (-amount delta) cancel exactly, leaving a net-zero delta with no separate sync/
+            // settle step needed here, unlike a swap where an external router settles its own
+            // side. take() itself reverts (NativeTransferFailed) if `to` cannot receive the
+            // ETH, which reverts this entire call atomically - the liability
+            // ClogMarket.withdraw already cleared is restored along with everything else, never
+            // silently lost.
+            (address market, address to, uint256 amount) = abi.decode(inner, (address, address, uint256));
+            poolManager.burn(market, _currencyId(Currency.wrap(address(0))), amount);
+            poolManager.take(Currency.wrap(address(0)), to, amount);
+        } else if (kind == REQUEST_DEPOSIT) {
+            // Real launch-time inventory deposit: sync PoolManager's own view of the token,
+            // have the market transfer its ENTIRE real balance in (via its own onlyHook-gated
+            // depositInventoryTo, called by this hook), settle, then mint the market an ERC6909
+            // claim for exactly that amount - the market's claim is now fully backed by a real,
+            // physical deposit, exactly as this profile's own tests have proven the mechanism
+            // works throughout (ClogV4HookBuySell.t.sol and others), just via a real function
+            // call here instead of a test-only vm.prank.
+            (address market, address tokenAddress, PoolKey memory key) = abi.decode(inner, (address, address, PoolKey));
+            uint256 balance = IERC20Like(tokenAddress).balanceOf(market);
+            require(balance > 0, "nothing to deposit");
+            poolManager.sync(key.currency1);
+            ClogMarket(market).depositInventoryTo(tokenAddress, address(poolManager));
+            poolManager.settle();
+            poolManager.mint(market, _currencyId(key.currency1), balance);
+        } else {
+            revert("unknown unlock request kind");
+        }
+
         return "";
     }
 

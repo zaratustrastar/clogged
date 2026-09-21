@@ -3,12 +3,20 @@ pragma solidity 0.8.26;
 
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC6909Claims} from "v4-core/src/interfaces/external/IERC6909Claims.sol";
 
 /// @notice Minimal interface into the hook this market trusts for its own withdrawal
 ///         plumbing - kept separate from importing ClogV4Hook.sol directly to avoid a circular
 ///         import (ClogV4Hook.sol itself imports ClogMarket.sol).
 interface IClogV4HookWithdrawal {
     function executeWithdrawal(address to, uint256 amount) external;
+}
+
+/// @notice Minimal ERC20 interface for this market's one-time launch-deposit transfer - kept
+///         separate from a full IERC20 import for the same reason as the interfaces above.
+interface IERC20Like {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
 }
 
 /// @title ClogMarket (vertical-slice version, now with the full 100M CLOG leg)
@@ -369,6 +377,39 @@ contract ClogMarket {
         pendingWithdrawals[to] = 0;
         IClogV4HookWithdrawal(hook).executeWithdrawal(to, amount);
         emit Withdrawn(to, amount);
+    }
+
+    /// @notice Grants this market's own immutable, already-trusted hook the per-currency ERC6909
+    ///         approvals it needs to move this market's own claims during beforeSwap/
+    ///         executeWithdrawal - part of the atomic launch sequence (see
+    ///         TickerRegistryV4.sol's own _launchMeme), called once right after this market's
+    ///         inventory has been deposited into PoolManager. Permissionless and safe to call
+    ///         repeatedly: it only ever grants `hook` - an immutable address this market itself
+    ///         named at construction and already trusts completely via onlyHook - permission
+    ///         over this market's OWN claims; no funds move, no other party benefits, and
+    ///         calling it again simply re-approves the same max allowance.
+    function grantHookApprovals(address poolManager_) external {
+        require(poolManager_ != address(0), "zero pool manager");
+        IERC6909Claims(poolManager_).approve(hook, uint256(uint160(token)), type(uint256).max);
+        IERC6909Claims(poolManager_).approve(hook, 0, type(uint256).max);
+    }
+
+    /// @notice Part of the atomic launch sequence: transfers this market's ENTIRE real token
+    ///         balance (the full physical supply MemeToken.setMarket just minted to it) to
+    ///         `to` - in practice always PoolManager itself, from inside the hook's own
+    ///         unlockCallback, mid-deposit. Restricted to onlyHook, the same trust boundary as
+    ///         applyBuy/applySell: an unrestricted version of this function, callable by anyone
+    ///         with an arbitrary destination, would let anyone drain this market's ENTIRE real
+    ///         token balance to any address at any time after launch (caught and fixed before
+    ///         this was ever shipped, not merely a theoretical concern) - restricting it to the
+    ///         market's own immutable, already-trusted hook closes that off completely, since
+    ///         the hook only ever calls this once, mid-launch, with PoolManager as the
+    ///         destination (see ClogV4Hook.sol's own depositMarketInventory).
+    function depositInventoryTo(address token_, address to) external onlyHook {
+        require(token_ == token, "wrong token");
+        uint256 balance = IERC20Like(token_).balanceOf(address(this));
+        require(balance > 0, "nothing to deposit");
+        require(IERC20Like(token_).transfer(to, balance), "token transfer failed");
     }
 
     /// @dev Pull-payment credit - mirrors production's own _credit exactly.
