@@ -44,6 +44,7 @@ contract ClogV4Hook is IHooks {
     address public immutable launchInitializer; // TickerRegistry (or equivalent) - the only caller allowed to registerMarket
 
     mapping(PoolId => address) public marketOf;
+    mapping(address => PoolId) public poolOf; // reverse relationship - a market may be registered to at most one pool, ever
 
     event MarketRegistered(PoolId indexed poolId, address indexed market);
 
@@ -62,12 +63,37 @@ contract ClogV4Hook is IHooks {
     ///         only by the launch initializer, and MUST happen before PoolManager.initialize()
     ///         is called for that pool - beforeInitialize (below) checks this is already set,
     ///         per the corrected atomic sequence: register -> initialize -> inventory deposit.
+    ///
+    /// @dev Does NOT rely on the launch initializer being honest to maintain the PoolKey/market
+    ///      binding invariant - validates the actual relationship directly, since an
+    ///      authorized-but-malformed call (a real bug in the launch flow, not just an external
+    ///      attacker) must be caught here too:
+    ///        - key.hooks must be this exact hook (a market registered against a DIFFERENT
+    ///          hook's PoolKey would never actually be reachable via this hook's own beforeSwap,
+    ///          but rejecting it here catches the mistake at registration time, not silently);
+    ///        - key.currency0 must be native ETH (address(0)) - the only pairing this
+    ///          architecture supports;
+    ///        - key.currency1 must be EXACTLY the market's own token() - never a different
+    ///          token paired against someone else's market;
+    ///        - the market's own hook() must be this exact hook - a market deployed pointing at
+    ///          a different (or no) hook could never legitimately authorize trades through this
+    ///          one, since its own onlyHook modifier would reject every call;
+    ///        - the market must never have been registered to any other PoolId before (poolOf) -
+    ///          one market, one pool, permanently.
     function registerMarket(PoolKey calldata key, address market) external {
         require(msg.sender == launchInitializer, "not launch initializer");
+        require(market != address(0), "zero market");
+        require(address(key.hooks) == address(this), "PoolKey hook mismatch");
+        require(Currency.unwrap(key.currency0) == address(0), "currency0 must be native ETH");
+        require(key.currency1 == Currency.wrap(ClogMarket(market).token()), "PoolKey currency1 must be exactly the market's own token");
+        require(ClogMarket(market).hook() == address(this), "market's own hook must be this hook");
+
         PoolId id = key.toId();
         require(marketOf[id] == address(0), "already registered");
-        require(market != address(0), "zero market");
+        require(PoolId.unwrap(poolOf[market]) == bytes32(0), "market already registered to a different pool");
+
         marketOf[id] = market;
+        poolOf[market] = id;
         emit MarketRegistered(id, market);
     }
 

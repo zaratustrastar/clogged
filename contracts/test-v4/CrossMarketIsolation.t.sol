@@ -35,7 +35,11 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
     address constant HOOK_ADDRESS = address(0x2088); // see ClogV4HookBuySell.t.sol for the flag derivation
 
     uint256 constant VIRTUAL_ETH_SEED = 9 ether;
+    // Config G's own virtualTokenSeed - a PRICING reserve only, never real token count (see
+    // ClogV4HookBuySell.t.sol's own docs for the full derivation).
     uint256 constant VIRTUAL_TOKEN_SEED = 1_800_000_000e18;
+    // MemeToken.TOTAL_SUPPLY exactly - what actually gets minted, deposited, and claimed.
+    uint256 constant PHYSICAL_TOKEN_SUPPLY = 1_000_000_000e18;
 
     bool private _depositingA;
     bool private _depositingB;
@@ -53,13 +57,14 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
 
     function _setUpMarket(string memory label, bool isMarketA) internal returns (ClogMarket m, MinimalMockToken t, PoolKey memory k) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
         k = PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
 
         hook.registerMarket(k, address(m));
         manager.initialize(k, 79228162514264337593543950336);
 
-        t.mint(address(m), VIRTUAL_TOKEN_SEED);
+        // Real, physical supply only - never the virtual pricing reserve (see contract-level docs).
+        t.mint(address(m), PHYSICAL_TOKEN_SUPPLY);
         if (isMarketA) {
             _depositingA = true;
         } else {
@@ -100,9 +105,9 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
             Currency currency1 = Currency.wrap(address(t));
             manager.sync(currency1);
             vm.prank(address(m));
-            t.transfer(address(manager), VIRTUAL_TOKEN_SEED);
+            t.transfer(address(manager), PHYSICAL_TOKEN_SUPPLY);
             manager.settle();
-            manager.mint(address(m), uint256(uint160(address(t))), VIRTUAL_TOKEN_SEED);
+            manager.mint(address(m), uint256(uint160(address(t))), PHYSICAL_TOKEN_SUPPLY);
             return bytes("");
         }
 

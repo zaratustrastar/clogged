@@ -17,6 +17,11 @@ import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
 ///         PoolManager (not a mock, not a fork) - a real buy, with every currency delta
 ///         (router's and hook's) inspected and required to be exactly zero at end-of-unlock,
 ///         and the market's own ERC6909 claim balances checked against the economic result.
+///
+/// @dev CORRECTED: VIRTUAL_TOKEN_SEED (1.8B) is a PRICING construct only - it is never how
+///      many real MemeTokens exist, and this test now never mints/deposits that amount as real
+///      inventory. PHYSICAL_TOKEN_SUPPLY (1B, matching MemeToken.TOTAL_SUPPLY exactly) is what
+///      actually gets minted, deposited into PoolManager, and claimed.
 contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     PoolManager manager;
     ClogV4Hook hook;
@@ -32,7 +37,14 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     address constant HOOK_ADDRESS = address(0x2088);
 
     uint256 constant VIRTUAL_ETH_SEED = 9 ether;
+    // Config G's own virtualTokenSeed = CURVE_ALLOCATION(900M) * bufferMultiplierBps(20_000) /
+    // BPS(10_000) = 1.8B - a PRICING reserve only, deliberately "deeper" than real supply so
+    // the curve behaves correctly. NEVER how many real MemeTokens exist.
     uint256 constant VIRTUAL_TOKEN_SEED = 1_800_000_000e18;
+    // MemeToken.TOTAL_SUPPLY exactly - the real, physical amount that ever gets minted (900M
+    // curve allocation + 100M CLOG allocation, undifferentiated in this vertical slice since
+    // the CLOG leg itself isn't ported yet - see ClogMarket.sol's own docs).
+    uint256 constant PHYSICAL_TOKEN_SUPPLY = 1_000_000_000e18;
 
     /// @dev Placeholder for the atomic launch deposit design from the architecture discussion
     ///      (register -> initialize -> inventory deposit) - not yet wired into ClogMarket's own
@@ -50,11 +62,11 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         hook = ClogV4Hook(HOOK_ADDRESS);
         // vm.etch only copies bytecode, not storage - immutables (poolManager,
         // launchInitializer) are inlined directly into bytecode by the compiler, so they're
-        // already correct on the etched copy; only real mapping storage (marketOf) would need
-        // re-establishing, which registerMarket (below) does fresh regardless.
+        // already correct on the etched copy; only real mapping storage (marketOf/poolOf) would
+        // need re-establishing, which registerMarket (below) does fresh regardless.
 
         token = new MinimalMockToken();
-        market = new ClogMarket(HOOK_ADDRESS, address(token), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), VIRTUAL_ETH_SEED, VIRTUAL_TOKEN_SEED, PHYSICAL_TOKEN_SUPPLY);
 
         key = PoolKey({
             currency0: Currency.wrap(address(0)), // native ETH
@@ -68,11 +80,12 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         hook.registerMarket(key, address(market));
         manager.initialize(key, 79228162514264337593543950336); // sqrtPriceX96 for price = 1, irrelevant here since the curve is fully hook-driven
 
-        // Real launch-time inventory deposit: mint the market's full curve allocation as real
-        // ERC20 (mirroring MemeToken.setMarket minting the full 1B to the market contract),
-        // then physically deposit it into PoolManager and mint the market an ERC6909 claim for
-        // exactly that amount - a real transfer+settle+mint sequence, not a shortcut.
-        token.mint(address(market), VIRTUAL_TOKEN_SEED);
+        // Real launch-time inventory deposit: mint the market's REAL, PHYSICAL supply (1B,
+        // mirroring MemeToken.setMarket minting exactly TOTAL_SUPPLY to the market contract -
+        // NEVER the 1.8B virtual pricing reserve), then physically deposit it into PoolManager
+        // and mint the market an ERC6909 claim for exactly that amount - a real
+        // transfer+settle+mint sequence, not a shortcut.
+        token.mint(address(market), PHYSICAL_TOKEN_SUPPLY);
         _depositing = true;
         manager.unlock(bytes(""));
         _depositing = false;
@@ -104,15 +117,15 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         require(msg.sender == address(manager), "not pool manager");
 
         if (_depositing) {
-            // Real launch-time deposit: physically transfer the market's own just-minted 1B
-            // (this slice: VIRTUAL_TOKEN_SEED) into PoolManager, settle, then mint the market
-            // an ERC6909 claim for exactly that amount - the market's claim is now fully
-            // backed by a real, physical deposit, exactly as the architecture requires.
+            // Real launch-time deposit: physically transfer the market's own just-minted
+            // PHYSICAL_TOKEN_SUPPLY into PoolManager, settle, then mint the market an ERC6909
+            // claim for exactly that amount - the market's claim is now fully backed by a
+            // real, physical deposit, exactly as the architecture requires.
             manager.sync(key.currency1);
             vm.prank(address(market));
-            token.transfer(address(manager), VIRTUAL_TOKEN_SEED);
+            token.transfer(address(manager), PHYSICAL_TOKEN_SUPPLY);
             manager.settle();
-            manager.mint(address(market), uint256(uint160(address(token))), VIRTUAL_TOKEN_SEED);
+            manager.mint(address(market), uint256(uint160(address(token))), PHYSICAL_TOKEN_SUPPLY);
             return bytes("");
         }
 
@@ -158,16 +171,64 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
 
     receive() external payable {}
 
+    // ── Physical-vs-virtual sanity (the P0 fix this pass) ────────────────────────────────────
+
+    function test_initialPhysicalInventory_isExactlyOneBillion_notVirtualSeed() public view {
+        assertEq(market.physicalInventory(), PHYSICAL_TOKEN_SUPPLY, "physicalInventory must start at exactly MemeToken.TOTAL_SUPPLY (1B)");
+        assertLt(market.physicalInventory(), VIRTUAL_TOKEN_SEED, "physical inventory must be strictly less than the virtual pricing reserve - they are never the same quantity");
+    }
+
+    function test_initialTokenClaim_isExactlyOneBillion_notVirtualSeed() public view {
+        assertEq(manager.balanceOf(address(market), uint256(uint160(address(token)))), PHYSICAL_TOKEN_SUPPLY, "the market's real ERC6909 token claim must be backed by exactly 1B real deposited tokens, never 1.8B");
+    }
+
+    function test_virtualRt_isEighteenHundredMillion_separateFromPhysicalSupply() public view {
+        assertEq(market.rt(), VIRTUAL_TOKEN_SEED, "the curve's own pricing reserve (rt) starts at the full virtual seed, independent of physical inventory");
+    }
+
+    function test_poolManagerRealTokenBalance_isExactlyOneBillion() public view {
+        assertEq(token.balanceOf(address(manager)), PHYSICAL_TOKEN_SUPPLY, "PoolManager must physically hold exactly the real 1B supply, never the 1.8B virtual figure");
+    }
+
+    function test_buyCannotDeliverMorePhysicalTokensThanRemainAvailable() public {
+        // Drain physicalInventory down near zero with a sequence of buys, then prove one more
+        // buy - even though the virtual curve math would happily imply MORE tokens exist -
+        // reverts rather than under-delivering or lying about the market's own real inventory.
+        // Mirrors production's own token.balanceOf(address(this)) >= totalTokensOut check
+        // exactly, just tracked as explicit state since this market holds no custody itself.
+        // Uses try/catch rather than vm.expectRevert directly, since the actual revert
+        // originates several call frames deep (unlock -> unlockCallback -> swap -> beforeSwap)
+        // and PoolManager's own hook-call machinery wraps it as a WrappedError, not the raw
+        // revert string - the same class of issue already solved in CrossMarketIsolation.t.sol.
+        uint256 hugeBuy = 50 ether; // large enough, against this curve's own re/rt, to imply far more than 1B tokens if physical supply didn't bound it
+        vm.deal(address(this), hugeBuy);
+        bool reverted;
+        try this.externalDoSwap(true, -int256(hugeBuy)) {
+            reverted = false;
+        } catch {
+            reverted = true;
+        }
+        assertTrue(reverted, "a buy implying more tokens than physically exist must revert, never under-deliver or lie about inventory");
+    }
+
+    /// @dev External wrapper solely so the try/catch above can call _doSwap across a real call
+    ///      boundary (try/catch only works on external calls in Solidity).
+    function externalDoSwap(bool zeroForOne, int256 amountSpecified) external returns (BalanceDelta) {
+        require(msg.sender == address(this), "test-only");
+        return _doSwap(zeroForOne, amountSpecified);
+    }
+
     // ── The actual proof ─────────────────────────────────────────────────────────────────────
 
     function test_realBuy_everyDeltaZero_marketStateCorrect() public {
         uint256 marketClaimAfterSetup = manager.balanceOf(address(market), uint256(uint160(address(token))));
-        assertEq(marketClaimAfterSetup, VIRTUAL_TOKEN_SEED, "sanity: market must hold its full token claim right after setUp's deposit step");
+        assertEq(marketClaimAfterSetup, PHYSICAL_TOKEN_SUPPLY, "sanity: market must hold its full REAL (physical) token claim right after setUp's deposit step, never the virtual seed");
 
         uint256 buyAmount = 0.01 ether;
 
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
+        uint256 prePhysicalInventory = market.physicalInventory();
 
         vm.deal(address(this), buyAmount);
         BalanceDelta swapDelta = _doSwap(true, -int256(buyAmount));
@@ -185,9 +246,10 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), buyAmount, "market's own ETH claim must equal the full gross input");
         assertEq(
             manager.balanceOf(address(market), uint256(uint160(address(token)))),
-            VIRTUAL_TOKEN_SEED - tokensOut,
-            "market's own remaining token claim must be the original seed minus whatever was delivered out"
+            PHYSICAL_TOKEN_SUPPLY - tokensOut,
+            "market's own remaining REAL token claim must be the physical supply minus whatever was actually delivered out"
         );
+        assertEq(market.physicalInventory(), prePhysicalInventory - tokensOut, "physicalInventory must fall by exactly tokensOut, matching the real claim exactly");
 
         // ── End-state invariant 4: the hook itself holds NOTHING - it never accumulates ──────
         assertEq(manager.balanceOf(HOOK_ADDRESS, uint256(uint160(address(0)))), 0, "hook must hold zero ETH claim of its own - it only ever passes claims to the market");
@@ -201,6 +263,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         assertEq(market.re(), preRe + buyAmount, "curve re must have advanced by exactly the gross input (no tax in this slice)");
         assertGt(tokensOut, 0, "must have actually received tokens");
         assertEq(market.sold(), tokensOut, "market's own sold counter must match what was actually delivered");
+        assertEq(market.k(), market.re() * market.rt(), "k must be re-anchored to the CURRENT (re, rt) exactly after the trade, matching production's own re-anchor");
     }
 
     function test_realSell_afterABuy_everyDeltaZero_marketStateCorrect() public {
@@ -218,6 +281,8 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         uint256 preManagerEthBalance = address(manager).balance;
         uint256 preRe = market.re();
         uint256 preRt = market.rt();
+        uint256 preSold = market.sold();
+        uint256 prePhysicalInventory = market.physicalInventory();
         uint256 preMarketTokenClaim = manager.balanceOf(address(market), uint256(uint160(address(token))));
         uint256 preMarketEthClaim = manager.balanceOf(address(market), uint256(uint160(address(0))));
         uint256 preUserEthBalance = address(this).balance;
@@ -233,6 +298,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // ── End-state invariant 3: the market's own ERC6909 claims match the economic result ─
         assertEq(manager.balanceOf(address(market), uint256(uint160(address(0)))), preMarketEthClaim - ethOut, "market's own ETH claim must fall by exactly ethOut (burned to pay the seller)");
         assertEq(manager.balanceOf(address(market), uint256(uint160(address(token)))), preMarketTokenClaim + sellAmount, "market's own token claim must grow by exactly the tokens sold back in (minted from the router's real deposit)");
+        assertEq(market.physicalInventory(), prePhysicalInventory + sellAmount, "physicalInventory must grow by exactly sellAmount - the sold-back tokens are real inventory again");
 
         // ── End-state invariant 4: the hook itself holds NOTHING - it never accumulates ──────
         assertEq(manager.balanceOf(HOOK_ADDRESS, uint256(uint160(address(0)))), 0, "hook must hold zero ETH claim of its own after a sell either");
@@ -247,5 +313,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         assertEq(market.rt(), preRt + sellAmount, "curve rt must have advanced by exactly the tokens sold in");
         assertEq(market.re(), preRe - ethOut, "curve re must have fallen by exactly the ETH paid out (no tax in this slice)");
         assertGt(ethOut, 0, "must have actually received ETH");
+        assertEq(market.sold(), preSold - sellAmount, "sold must decrement by exactly the tokens sold back in, matching production's own sell() exactly");
+        assertEq(market.k(), market.re() * market.rt(), "k must be re-anchored to the CURRENT (re, rt) exactly after the trade, matching production's own re-anchor");
     }
 }
