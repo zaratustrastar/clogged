@@ -12,6 +12,7 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
+import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 
 /// @title P0 cross-market isolation
 /// @notice Every ClogMarket approves the SAME universal hook, so PoolManager's own ERC6909
@@ -35,6 +36,7 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
     address constant HOOK_ADDRESS = address(0x2088); // see ClogV4HookBuySell.t.sol for the flag derivation
     address tickerOwner = makeAddr("tickerOwner");
     address multisig = makeAddr("multisig");
+    MockTickerNFT tickerNFT;
 
     uint256 constant VIRTUAL_ETH_SEED = 9 ether;
     // Config G's own virtualTokenSeed - a PRICING reserve only, never real token count (see
@@ -54,13 +56,17 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
         vm.etch(HOOK_ADDRESS, address(impl).code);
         hook = ClogV4Hook(HOOK_ADDRESS);
 
-        (marketA, tokenA, keyA) = _setUpMarket("A", true);
-        (marketB, tokenB, keyB) = _setUpMarket("B", false);
+        tickerNFT = new MockTickerNFT();
+        tickerNFT.setOwner(1, tickerOwner);
+        tickerNFT.setOwner(2, tickerOwner);
+
+        (marketA, tokenA, keyA) = _setUpMarket(1, true);
+        (marketB, tokenB, keyB) = _setUpMarket(2, false);
     }
 
-    function _setUpMarket(string memory label, bool isMarketA) internal returns (ClogMarket m, MinimalMockToken t, PoolKey memory k) {
+    function _setUpMarket(uint256 tickerTokenId, bool isMarketA) internal returns (ClogMarket m, MinimalMockToken t, PoolKey memory k) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), tickerOwner, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), address(tickerNFT), tickerTokenId, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
         k = PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
 
         hook.registerMarket(k, address(m));
@@ -81,8 +87,6 @@ contract CrossMarketIsolationTest is Test, IUnlockCallback {
         manager.approve(HOOK_ADDRESS, uint256(uint160(address(t))), type(uint256).max);
         manager.approve(HOOK_ADDRESS, uint256(uint160(address(0))), type(uint256).max);
         vm.stopPrank();
-
-        label; // silence unused-param warning; kept for readability at call sites
     }
 
     // ── Router plumbing (same pattern as ClogV4HookBuySell.t.sol) ────────────────────────────

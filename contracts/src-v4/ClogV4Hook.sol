@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
@@ -37,7 +38,7 @@ import {ClogMarket} from "./ClogMarket.sol";
 ///      yet (P0, still required before this can be trusted), no real hook-address flag mining
 ///      (tests use vm.etch onto a manually-constructed address with the right permission bits -
 ///      real deployment needs actual CREATE2 salt mining, not yet done).
-contract ClogV4Hook is IHooks {
+contract ClogV4Hook is IHooks, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
 
     IPoolManager public immutable poolManager;
@@ -176,6 +177,37 @@ contract ClogV4Hook is IHooks {
     ///      CurrencyLibrary.toId() exactly (native ETH is address(0), so its id is 0).
     function _currencyId(Currency currency) internal pure returns (uint256) {
         return uint256(uint160(Currency.unwrap(currency)));
+    }
+
+    /// @notice Called by a registered market's own withdraw(to) to convert `amount` of that
+    ///         market's ERC6909 ETH claim into real native ETH, sent directly to `to`.
+    ///         Restricted to registered markets calling on their own behalf - msg.sender IS the
+    ///         market whose own claim gets burned, never an arbitrary caller naming an arbitrary
+    ///         market/amount, since this hook holds blanket per-currency ERC6909 approval from
+    ///         every registered market and that trust must never be redirectable by anyone else.
+    function executeWithdrawal(address to, uint256 amount) external {
+        require(PoolId.unwrap(poolOf[msg.sender]) != bytes32(0), "not a registered market");
+        require(to != address(0), "zero recipient");
+        require(amount > 0, "zero amount");
+        poolManager.unlock(abi.encode(msg.sender, to, amount));
+    }
+
+    /// @notice IUnlockCallback - exclusively reached via executeWithdrawal above (the swap
+    ///         flow's own unlock() call is made by the ROUTER, never by this hook, so this is
+    ///         never invoked mid-swap). Burns exactly `amount` of `market`'s own ETH claim and
+    ///         takes the same amount out as real native ETH directly to `to` - burn (+amount
+    ///         delta for this hook) and take (-amount delta) cancel exactly, leaving a net-zero
+    ///         delta with no separate sync/settle step needed here, unlike a swap where an
+    ///         external router settles its own side. take() itself reverts
+    ///         (NativeTransferFailed) if `to` cannot receive the ETH, which reverts this entire
+    ///         call atomically - the liability ClogMarket.withdraw already cleared is restored
+    ///         along with everything else, never silently lost.
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(poolManager), "not pool manager");
+        (address market, address to, uint256 amount) = abi.decode(data, (address, address, uint256));
+        poolManager.burn(market, _currencyId(Currency.wrap(address(0))), amount);
+        poolManager.take(Currency.wrap(address(0)), to, amount);
+        return "";
     }
 
     // ── Unused hook callbacks - no-ops, permission flags for these are never set ─────────────

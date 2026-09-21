@@ -13,6 +13,7 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {ClogV4Hook} from "../src-v4/ClogV4Hook.sol";
 import {ClogMarket} from "../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "./mocks/MinimalMockToken.sol";
+import {MockTickerNFT} from "../test/mocks/MockTickerNFT.sol";
 
 /// @notice Proves the core custody mechanism end-to-end against the REAL, unmodified v4-core
 ///         PoolManager (not a mock, not a fork) - a real buy, with every currency delta
@@ -33,6 +34,8 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
     address launchInitializer = address(this); // this test acts as TickerRegistry for setup
     address tickerOwner = makeAddr("tickerOwner");
     address multisig = makeAddr("multisig");
+    MockTickerNFT tickerNFT;
+    uint256 constant TICKER_TOKEN_ID = 1;
 
     // BEFORE_INITIALIZE_FLAG (1<<13) | BEFORE_SWAP_FLAG (1<<7) | BEFORE_SWAP_RETURNS_DELTA_FLAG (1<<3)
     // = 8192 + 128 + 8 = 8328 = 0x2088. Test-only address construction via vm.etch - real
@@ -70,7 +73,9 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         // need re-establishing, which registerMarket (below) does fresh regardless.
 
         token = new MinimalMockToken();
-        market = new ClogMarket(HOOK_ADDRESS, address(token), tickerOwner, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        tickerNFT = new MockTickerNFT();
+        tickerNFT.setOwner(TICKER_TOKEN_ID, tickerOwner);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
 
         key = PoolKey({
             currency0: Currency.wrap(address(0)), // native ETH

@@ -2,6 +2,14 @@
 pragma solidity 0.8.26;
 
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
+/// @notice Minimal interface into the hook this market trusts for its own withdrawal
+///         plumbing - kept separate from importing ClogV4Hook.sol directly to avoid a circular
+///         import (ClogV4Hook.sol itself imports ClogMarket.sol).
+interface IClogV4HookWithdrawal {
+    function executeWithdrawal(address to, uint256 amount) external;
+}
 
 /// @title ClogMarket (vertical-slice version, now with the full 100M CLOG leg)
 /// @notice Non-custodial per-ticker economic state engine - the intended descendant of
@@ -11,16 +19,21 @@ import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 ///         contract's pure state-transition functions from inside beforeSwap.
 ///
 /// @dev STILL DELIBERATELY DEFERRED, explicitly (not an oversight, and NOT to be described as
-///      "finished" until built): ticker-owner-fee via live TickerNFT.ownerOf() lookup (this
-///      slice uses a fixed immutable address); the real WinnerPot-share ETH routing mechanism
-///      (mint-to-RewardVault + recordWinnerPotClaim - both the trading-tax WinnerPot share and
-///      the CLOG-extraction WinnerPot share are tracked as this contract's own winnerPotLiability
-///      accumulator for now, exactly like owner/multisig's pendingWithdrawals, pending that
-///      separate integration piece); the claim-native PoolManager withdrawal path for
-///      owner/multisig's own pendingWithdrawals (they accumulate correctly here, but nothing
-///      yet lets them actually pull a real ERC6909 claim out); governance-adjustable
-///      targetExtractionBps/safetyFloorBps (this slice hardcodes the production defaults,
-///      4_000/5_000, with no setter yet).
+///      "finished" until built): the real WinnerPot-share ETH routing mechanism (mint-to-
+///      RewardVault + recordWinnerPotClaim - both the trading-tax WinnerPot share and the
+///      CLOG-extraction WinnerPot share are still tracked as this contract's own
+///      winnerPotLiability accumulator for now, pending that separate integration piece);
+///      governance-adjustable targetExtractionBps/safetyFloorBps (this slice hardcodes the
+///      production defaults, 4_000/5_000, with no setter yet).
+///
+/// @dev NOW PORTED, this pass, verified against the exact production BondingCurveClog.sol
+///      source (read directly before implementing, not from memory): dynamic ticker-owner
+///      resolution via IERC721(tickerNFT).ownerOf(tickerTokenId), resolved fresh on every
+///      trade rather than cached - an NFT transfer redirects all FUTURE fees immediately, while
+///      already-credited pendingWithdrawals for the previous owner remain exactly as they were
+///      (pendingWithdrawals is keyed by address, so a later resolution simply credits a
+///      different key - it can never rewrite or move what was already credited to the old one);
+///      the full claim-native withdraw(to) path (see below).
 ///
 /// @dev NOW PORTED, this pass, verified against the exact production BondingCurveClog.sol
 ///      source (read directly before implementing, not from memory): the full 900M curve /
@@ -61,7 +74,8 @@ contract ClogMarket {
 
     address public immutable hook; // the universal ClogV4Hook - the only caller allowed to trigger state transitions
     address public immutable token; // this ticker's MemeToken
-    address public immutable tickerOwner; // fixed for this slice - live TickerNFT.ownerOf() lookup is a deferred, separate piece (see contract-level docs)
+    address public immutable tickerNFT; // ERC721 whose ownerOf(tickerTokenId) IS the ticker-owner fee recipient - resolved dynamically on every trade, never cached, matching production exactly
+    uint256 public immutable tickerTokenId;
     address public immutable multisig;
 
     uint256 public re; // virtualEthSeed + realETH, always - drives curve pricing
@@ -90,6 +104,7 @@ contract ClogMarket {
     event Bought(uint256 grossInput, uint256 tax, uint256 curveTokens, uint256 clogTokens, uint256 clogExtracted, uint256 clogRetained, uint256 newRe, uint256 newRt);
     event Sold(uint256 tokensIn, uint256 grossPayout, uint256 tax, uint256 netEthOut, bool wasCapped, uint256 newRe, uint256 newRt);
     event Credited(address indexed to, uint256 amount, uint256 newPending);
+    event Withdrawn(address indexed to, uint256 amount);
     event ClogTokensReleased(uint256 clogTokens, uint256 newHwm);
     event ClogRevenueExtracted(uint256 extracted, uint256 retained, uint256 effectiveBps);
 
@@ -98,12 +113,13 @@ contract ClogMarket {
         _;
     }
 
-    constructor(address hook_, address token_, address tickerOwner_, address multisig_, uint256 virtualEthSeed_, uint256 bufferMultiplierBps_) {
-        require(hook_ != address(0) && token_ != address(0) && tickerOwner_ != address(0) && multisig_ != address(0), "zero address");
+    constructor(address hook_, address token_, address tickerNFT_, uint256 tickerTokenId_, address multisig_, uint256 virtualEthSeed_, uint256 bufferMultiplierBps_) {
+        require(hook_ != address(0) && token_ != address(0) && tickerNFT_ != address(0) && multisig_ != address(0), "zero address");
         require(virtualEthSeed_ > 0 && bufferMultiplierBps_ > 0, "zero seed");
         hook = hook_;
         token = token_;
-        tickerOwner = tickerOwner_;
+        tickerNFT = tickerNFT_;
+        tickerTokenId = tickerTokenId_;
         multisig = multisig_;
         virtualEthSeed = virtualEthSeed_;
 
@@ -114,6 +130,13 @@ contract ClogMarket {
         clogRemaining = CLOG_ALLOCATION;
         rtCeiling = rt;
         physicalInventory = CURVE_ALLOCATION + CLOG_ALLOCATION; // fixed, exactly MemeToken.TOTAL_SUPPLY
+    }
+
+    /// @notice The current ticker-owner fee recipient - resolved fresh on every call, exactly
+    ///         like production's own ticketOwnerRecipient(). Never cached anywhere: an NFT
+    ///         transfer takes effect on the very next trade.
+    function ticketOwnerRecipient() public view returns (address) {
+        return IERC721(tickerNFT).ownerOf(tickerTokenId);
     }
 
     /// @notice Full-tax-aware, CLOG-leg-aware buy. Called by the hook mid-beforeSwap with the
@@ -139,7 +162,7 @@ contract ClogMarket {
         require(tokensOut <= physicalInventory, "exceeds available token inventory");
         physicalInventory -= tokensOut;
 
-        _credit(tickerOwner, ownerShare);
+        _credit(ticketOwnerRecipient(), ownerShare);
         _credit(multisig, multisigShare);
         winnerPotShare = taxWinnerPotShare + clogWinnerPotShare;
         winnerPotLiability += winnerPotShare;
@@ -316,11 +339,28 @@ contract ClogMarket {
         uint256 multisigShare = Math.mulDiv(tax, MULTISIG_TAX_BPS, BPS);
         winnerPotShare = tax - ownerShare - multisigShare;
 
-        _credit(tickerOwner, ownerShare);
+        _credit(ticketOwnerRecipient(), ownerShare);
         _credit(multisig, multisigShare);
         winnerPotLiability += winnerPotShare;
 
         emit Sold(tokensIn, grossPayout, tax, netEthOut, wasCapped, re, rt);
+    }
+
+    /// @notice Permissionless trigger for pulling `to`'s accumulated pendingWithdrawals out as
+    ///         real native ETH - the v4 equivalent of production's own withdraw(to). ETH always
+    ///         goes to `to`, regardless of who calls this (same permissionless-trigger pattern
+    ///         production uses throughout). Liability is cleared BEFORE any external call or
+    ///         value movement (checks-effects-interactions, matching production exactly) - if
+    ///         the hook's own PoolManager unlock/burn/take sequence fails for any reason
+    ///         (including `to` itself being unable to receive ETH), the ENTIRE call reverts
+    ///         atomically, so the just-cleared liability is restored along with everything
+    ///         else - it is never silently lost.
+    function withdraw(address to) external {
+        uint256 amount = pendingWithdrawals[to];
+        require(amount > 0, "nothing to withdraw");
+        pendingWithdrawals[to] = 0;
+        IClogV4HookWithdrawal(hook).executeWithdrawal(to, amount);
+        emit Withdrawn(to, amount);
     }
 
     /// @dev Pull-payment credit - mirrors production's own _credit exactly.

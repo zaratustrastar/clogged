@@ -71,7 +71,7 @@ contract EconomicEquivalenceTest is Test {
         engine.registerToken(address(production));
 
         // ── v4 ClogMarket - IDENTICAL initial parameters, this test contract as its own hook ──
-        v4Market = new ClogMarket(address(this), address(productionToken), ticketOwner, multisig, virtualEthSeed, BUFFER_BPS);
+        v4Market = new ClogMarket(address(this), address(productionToken), address(tickerNFT), 1, multisig, virtualEthSeed, BUFFER_BPS);
 
         vm.deal(address(this), 10_000 ether);
         productionToken.approve(address(production), type(uint256).max);
