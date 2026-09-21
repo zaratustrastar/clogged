@@ -8,8 +8,8 @@ interface IRealReserve {
 
 /// @title EligibilityRegistry
 /// @notice Decides which tokens are candidates for the uniform lottery draw:
-///           - HWM curve progress >= MIN_PROGRESS_BPS (currently 5%)
-///           - real reserve continuously >= MIN_RESERVE_THRESHOLD for >= 30 minutes
+///           - HWM curve progress >= minProgressBps (immutable per-deployment, 500 bps in production)
+///           - real reserve continuously >= minReserveThreshold for >= requiredAbsoluteSeconds
 ///         There is no minimum token age: a token launched minutes ago can qualify for the
 ///         CURRENTLY open round the moment it satisfies the above, exactly like any older token.
 ///
@@ -58,11 +58,22 @@ interface IRealReserve {
 ///      own holders, most obviously) can trivially close this gap themselves with one
 ///      permissionless `qualify` call.
 contract EligibilityRegistry {
-    uint256 public constant MAX_TICKERS = 7_778; // 7,777 public + 1 reserved (CLOG)
-    uint256 public constant MIN_PROGRESS_BPS = 500; // 5% HWM curve progress; re-evaluate per curve config
-    uint256 public constant MIN_RESERVE_THRESHOLD = 0.229 ether; // Config-G-scale illustrative value;
-        // see architecture doc's Sybil-cost table -- re-derive once the final curve config is locked.
-    uint256 public constant REQUIRED_ABSOLUTE_SECONDS = 1_800; // 30 minutes continuous, no round tie
+    uint256 public constant MAX_TICKERS = 7_778; // 7,777 public + 1 reserved (CLOG) -- capacity, not
+        // an economic parameter, so this stays a true compile-time constant across every deployment.
+
+    /// @notice Deployment-scoped eligibility parameters, immutable once constructed -- no
+    ///         governance setter, no admin setter, no path to change them after deployment, by
+    ///         design (see the task this was built for: "immutable deployment parameters").
+    ///         Semantics are byte-for-byte identical to what were previously hardcoded constants
+    ///         of the same name (just upper-cased) -- only WHERE the value comes from changed,
+    ///         from "baked into this contract's bytecode" to "chosen once at construction time".
+    ///         This is what lets a canary deployment (cheap, fast qualification for full-cycle
+    ///         testing) and the final public deployment (real economic gates) share the exact
+    ///         same contract source, differing only in deployment-time configuration -- never a
+    ///         Solidity code fork between the two.
+    uint256 public immutable minProgressBps; // HWM curve progress gate, in basis points of CURVE_ALLOCATION
+    uint256 public immutable minReserveThreshold; // real-reserve gate, in wei
+    uint256 public immutable requiredAbsoluteSeconds; // continuous above-threshold streak required
 
     address public immutable deployer; // authorized to call setRoundManager exactly once
     address public roundManager; // address(0) until setRoundManager is called; permanent afterward
@@ -75,7 +86,7 @@ contract EligibilityRegistry {
 
     // Per token: the timestamp its current continuous above-threshold streak began (0 if not
     // currently above threshold). Carries across round boundaries untouched -- only an actual dip
-    // below MIN_RESERVE_THRESHOLD resets it. See contract-level notes above.
+    // below minReserveThreshold resets it. See contract-level notes above.
     mapping(uint256 => uint256) public aboveThresholdSince;
 
     // Per-round (generation) dense candidate arrays -- append-only, built live during the round,
@@ -94,9 +105,20 @@ contract EligibilityRegistry {
         _;
     }
 
-    constructor(address deployer_) {
+    constructor(
+        address deployer_,
+        uint256 minProgressBps_,
+        uint256 minReserveThreshold_,
+        uint256 requiredAbsoluteSeconds_
+    ) {
         require(deployer_ != address(0), "zero deployer");
+        require(minProgressBps_ > 0 && minProgressBps_ <= 10_000, "invalid minProgressBps");
+        require(minReserveThreshold_ > 0, "zero minReserveThreshold");
+        require(requiredAbsoluteSeconds_ > 0, "zero requiredAbsoluteSeconds");
         deployer = deployer_;
+        minProgressBps = minProgressBps_;
+        minReserveThreshold = minReserveThreshold_;
+        requiredAbsoluteSeconds = requiredAbsoluteSeconds_;
         currentRoundId = 1;
         currentRoundOpenTime = block.timestamp;
     }
@@ -150,7 +172,7 @@ contract EligibilityRegistry {
 
     function _touch(uint256 tokenId) internal {
         uint256 reserve = IRealReserve(tokenMarket[tokenId]).realReserve();
-        bool nowAbove = reserve >= MIN_RESERVE_THRESHOLD;
+        bool nowAbove = reserve >= minReserveThreshold;
 
         if (nowAbove) {
             if (aboveThresholdSince[tokenId] == 0) {
@@ -164,11 +186,11 @@ contract EligibilityRegistry {
 
     function _maybeQualify(uint256 tokenId) internal {
         if (candidateIndexPlusOne[currentRoundId][tokenId] != 0) return; // already qualified this round
-        if (IRealReserve(tokenMarket[tokenId]).progressBps() < MIN_PROGRESS_BPS) return; // progress gate
+        if (IRealReserve(tokenMarket[tokenId]).progressBps() < minProgressBps) return; // progress gate
 
         uint256 since = aboveThresholdSince[tokenId];
         if (since == 0) return;
-        if (block.timestamp - since < REQUIRED_ABSOLUTE_SECONDS) return;
+        if (block.timestamp - since < requiredAbsoluteSeconds) return;
 
         uint256[] storage list = pendingCandidates[currentRoundId];
         list.push(tokenId);

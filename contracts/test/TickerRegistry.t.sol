@@ -30,7 +30,7 @@ contract TickerRegistryTest is Test {
     function setUp() public {
         virtualEthSeed = (5e9 * virtualTokenSeed) / 1e18;
 
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(address(0xD00D));
 
         nft = new TickerNFT("Ticker", "TICK", address(this), "https://example.com/metadata/", multisig);

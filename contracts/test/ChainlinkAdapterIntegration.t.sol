@@ -57,7 +57,7 @@ contract ChainlinkAdapterIntegrationTest is Test {
         // provider each get RoundManager's real address wired back afterward via a one-time
         // setter) -- deploy engine and provider first, RoundManager second using their real
         // addresses directly, then wire the relationship back. No CREATE-address prediction.
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         provider = new ChainlinkRandomnessProvider(address(router), MOCK_SELECTOR, governance, address(this));
         rm = new RoundManager(address(engine), address(provider), governance);
         engine.setRoundManager(address(rm));

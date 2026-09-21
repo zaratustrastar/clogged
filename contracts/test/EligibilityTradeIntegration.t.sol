@@ -40,7 +40,7 @@ contract EligibilityTradeIntegrationTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         rm = new RoundManager(address(engine), address(provider), governance);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));

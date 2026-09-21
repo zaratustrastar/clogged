@@ -118,12 +118,37 @@ Deploys `EligibilityRegistry`, `RoundManager`, `RewardVault`, `TickerNFT`,
 `TickerRegistry`, `ChainlinkRandomnessProvider`, and the `TimelockController`
 that becomes `governance` — permanently, with no transfer path. Needs:
 `CCIP_ROUTER_ROBINHOOD`, `ARBITRUM_CHAIN_SELECTOR`, `SAFE_ADDRESS`,
-`FEE_MULTISIG_ADDRESS`, `TICKER_NFT_BASE_URI`.
+`FEE_MULTISIG_ADDRESS`, `TICKER_NFT_BASE_URI`, `MIN_PROGRESS_BPS`,
+`MIN_RESERVE_THRESHOLD_WEI`, `REQUIRED_ABSOLUTE_SECONDS`, `DEPLOYMENT_MODE`.
+
+`DEPLOYMENT_MODE` must be exactly `"production"` or `"canary"` — no other
+value, no default. In `"production"` mode the script REQUIRES
+`MIN_PROGRESS_BPS=500`, `MIN_RESERVE_THRESHOLD_WEI=229000000000000000`
+(0.229 ether), and `REQUIRED_ABSOLUTE_SECONDS=1800` exactly — the real
+public eligibility gates — and reverts otherwise, so a canary configuration
+can never be deployed by accident as the real public collection. In
+`"canary"` mode the script REJECTS eligibility values that exactly match
+production, so a canary deployment can't accidentally defeat its own point
+by secretly using the real thresholds. A cheap full-cycle canary test
+(see the architecture notes on why) uses something like
+`MIN_PROGRESS_BPS=4`, `MIN_RESERVE_THRESHOLD_WEI=3000000000000000`
+(0.003 ether) — see `EligibilityRegistry.t.sol`'s own
+`test_canaryConfiguration_*` tests for the empirical derivation this is
+based on (0.003 ETH real reserve corresponds to ~6 bps of curve progress
+under the current Config-G curve, so 4 bps keeps reserve, not progress, as
+the actual binding gate).
 
 ```bash
 export TICKER_NFT_BASE_URI=https://clog.run/api/ticker-metadata/
 export FEE_MULTISIG_ADDRESS=<your fee multisig address>
+export DEPLOYMENT_MODE=production
+export MIN_PROGRESS_BPS=500
+export MIN_RESERVE_THRESHOLD_WEI=229000000000000000
+export REQUIRED_ABSOLUTE_SECONDS=1800
 ```
+
+See `DeployRobinhoodChainTimelockTest`'s own `test_deploymentMode_*` and
+`test_eligibilityGuard_*` tests for the guard's dedicated coverage.
 
 Dry run:
 

@@ -14,7 +14,7 @@ contract EligibilityRegistryTest is Test {
     }
 
     function setUp() public {
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         engine.setRoundManager(roundManager);
     }
 
@@ -253,13 +253,13 @@ contract EligibilityRegistryTest is Test {
     // ── setRoundManager one-time initialization ─────────────────────────────
 
     function test_setRoundManager_deployerCanInitializeOnce() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         fresh.setRoundManager(address(0x9999));
         assertEq(fresh.roundManager(), address(0x9999));
     }
 
     function test_setRoundManager_secondInitializationReverts() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         fresh.setRoundManager(address(0x9999));
         vm.expectRevert();
         fresh.setRoundManager(address(0x8888));
@@ -267,20 +267,118 @@ contract EligibilityRegistryTest is Test {
     }
 
     function test_setRoundManager_unauthorizedCannotInitialize() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         vm.prank(address(0xBEEF)); // not the deployer
         vm.expectRevert();
         fresh.setRoundManager(address(0x9999));
     }
 
     function test_setRoundManager_zeroAddressRejected() public {
-        EligibilityRegistry fresh = new EligibilityRegistry(address(this));
+        EligibilityRegistry fresh = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         vm.expectRevert();
         fresh.setRoundManager(address(0));
     }
 
     function test_constructor_zeroDeployerRejected() public {
         vm.expectRevert();
-        new EligibilityRegistry(address(0));
+        new EligibilityRegistry(address(0), 500, 0.229 ether, 1_800);
+    }
+
+    function test_constructor_zeroMinProgressBpsRejected() public {
+        vm.expectRevert();
+        new EligibilityRegistry(address(this), 0, 0.229 ether, 1_800);
+    }
+
+    function test_constructor_minProgressBpsOverOneHundredPercentRejected() public {
+        vm.expectRevert();
+        new EligibilityRegistry(address(this), 10_001, 0.229 ether, 1_800);
+    }
+
+    function test_constructor_zeroMinReserveThresholdRejected() public {
+        vm.expectRevert();
+        new EligibilityRegistry(address(this), 500, 0, 1_800);
+    }
+
+    function test_constructor_zeroRequiredAbsoluteSecondsRejected() public {
+        vm.expectRevert();
+        new EligibilityRegistry(address(this), 500, 0.229 ether, 0);
+    }
+
+    // ── Deployment-scoped configuration (canary vs production) ──────────────
+
+    function test_immutableParams_areExposedAndMatchWhatWasPassedToConstructor() public view {
+        assertEq(engine.minProgressBps(), 500);
+        assertEq(engine.minReserveThreshold(), 0.229 ether);
+        assertEq(engine.requiredAbsoluteSeconds(), 1_800);
+    }
+
+    /// @notice THE required canary-derivation proof (see docs/DEPLOYMENTS.md and the deploy
+    ///         script's own CANARY_* env var validation for the full derivation writeup):
+    ///         empirically derived against the real, current BondingCurveClog curve math
+    ///         (Config G: 9 ETH virtual seed, 2.0x buffer) that realReserve() == 0.003 ether
+    ///         corresponds to progressBps() == 6 - so a canary deployment configured with
+    ///         minProgressBps = 4 (comfortably below 6, never the binding constraint) makes the
+    ///         0.003 ETH reserve gate the actual binding economic qualification gate, exactly as
+    ///         required. This test constructs a SEPARATE, canary-configured EligibilityRegistry
+    ///         (not the suite's own 500bps/0.229ETH `engine`) and proves a token can actually
+    ///         qualify at approximately the intended 0.003 ETH level under those parameters.
+    function test_canaryConfiguration_tokenQualifiesAtApproximately_0_003_ether_reserve() public {
+        EligibilityRegistry canaryEngine = new EligibilityRegistry(address(this), 4, 0.003 ether, 1_800);
+        canaryEngine.setRoundManager(roundManager);
+
+        MockReserveMarket m = new MockReserveMarket();
+        // 0.0032 ETH real reserve (just past the 0.003 ETH target, as an actual canary buy
+        // sequence would realistically land) and progressBps 6 (the real, derived value at
+        // that same reserve level - not a round number chosen for test convenience).
+        m.setReserve(0.0032 ether);
+        m.setProgressBps(6);
+        uint256 tokenId = canaryEngine.registerToken(address(m));
+
+        canaryEngine.onTrade(tokenId); // streak begins
+        vm.warp(block.timestamp + 1_800); // the full required streak, same as production
+        canaryEngine.onTrade(tokenId); // re-touch after the streak completes
+
+        assertTrue(canaryEngine.isCandidate(canaryEngine.currentRoundId(), tokenId), "must qualify at the canary's own 0.003 ETH / 4 bps configuration");
+    }
+
+    /// @notice The reserve gate, not the progress gate, is what's actually binding under the
+    ///         canary configuration - a token below the 0.003 ETH reserve gate must still fail
+    ///         to qualify even though its progressBps (6, comfortably above minProgressBps=4)
+    ///         would already satisfy the progress gate alone.
+    function test_canaryConfiguration_reserveGateIsBinding_notProgressGate() public {
+        EligibilityRegistry canaryEngine = new EligibilityRegistry(address(this), 4, 0.003 ether, 1_800);
+        canaryEngine.setRoundManager(roundManager);
+
+        MockReserveMarket m = new MockReserveMarket();
+        m.setReserve(0.002 ether); // below the 0.003 ETH canary reserve gate
+        m.setProgressBps(6); // already above the 4 bps canary progress gate
+        uint256 tokenId = canaryEngine.registerToken(address(m));
+
+        canaryEngine.onTrade(tokenId);
+        vm.warp(block.timestamp + 1_800);
+        canaryEngine.onTrade(tokenId);
+
+        assertFalse(canaryEngine.isCandidate(canaryEngine.currentRoundId(), tokenId), "reserve gate must remain binding even when progress is already satisfied");
+    }
+
+    /// @notice A token that would qualify under the FINAL production configuration
+    ///         (500 bps / 0.229 ETH) but only reaches the canary's much lower reserve level
+    ///         must NOT qualify under a canary-configured registry - confirms the two
+    ///         configurations are genuinely independent, not accidentally permissive of each
+    ///         other's thresholds.
+    function test_canaryConfiguration_doesNotAccidentallyQualifyAtProductionThresholds() public {
+        EligibilityRegistry productionEngine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
+        productionEngine.setRoundManager(roundManager);
+
+        MockReserveMarket m = new MockReserveMarket();
+        m.setReserve(0.003 ether); // canary-scale reserve, far below the production 0.229 ETH gate
+        m.setProgressBps(6); // canary-scale progress, far below the production 500 bps gate
+        uint256 tokenId = productionEngine.registerToken(address(m));
+
+        productionEngine.onTrade(tokenId);
+        vm.warp(block.timestamp + 1_800);
+        productionEngine.onTrade(tokenId);
+
+        assertFalse(productionEngine.isCandidate(productionEngine.currentRoundId(), tokenId), "canary-scale reserve/progress must not satisfy the production configuration's own real gates");
     }
 }

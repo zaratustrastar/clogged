@@ -69,6 +69,15 @@ contract DeployRobinhoodChainTimelockTest is Test {
         vm.setEnv("FEE_MULTISIG_ADDRESS", vm.toString(safe));
         vm.setEnv("GOVERNANCE_PROPOSER_ADDRESS", vm.toString(governanceProposer));
         vm.setEnv("TICKER_NFT_BASE_URI", "https://clog.run/api/ticker-metadata/");
+        // This suite exercises timelock/governance behavior, not eligibility configuration -
+        // defaults to the real production eligibility values and DEPLOYMENT_MODE=production,
+        // exactly what a real public deploy would use, so the production guard itself is
+        // satisfied by default here (see this same file's own test_deploymentMode_* and
+        // test_eligibilityGuard_* tests below for the guard's own dedicated coverage).
+        vm.setEnv("MIN_PROGRESS_BPS", "500");
+        vm.setEnv("MIN_RESERVE_THRESHOLD_WEI", vm.toString(uint256(0.229 ether)));
+        vm.setEnv("REQUIRED_ABSOLUTE_SECONDS", "1800");
+        vm.setEnv("DEPLOYMENT_MODE", "production");
     }
 
     function test_missingGovernanceProposerEnvVar_revertsLoudly_notSilentDefault() public {
@@ -255,5 +264,108 @@ contract DeployRobinhoodChainTimelockTest is Test {
         assertEq(
             address(d.roundManager.rewardVault()), address(d.rewardVault), "action must execute after the real wait"
         );
+    }
+
+    // ── Eligibility deployment-mode guard (canary vs production) ────────────
+
+    function test_deploymentMode_missingEnvVar_revertsLoudly() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", ""); // forced unparseable, same technique as the other missing-env tests above
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert();
+        runCaller.callRun(deployer);
+    }
+
+    function test_deploymentMode_invalidValue_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "staging"); // neither "production" nor "canary"
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert();
+        runCaller.callRun(deployer);
+    }
+
+    function test_eligibilityGuard_productionMode_wrongMinProgressBps_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "production");
+        vm.setEnv("MIN_PROGRESS_BPS", "4"); // the canary value, not production's real 500
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert(bytes("production deployment requires MIN_PROGRESS_BPS=500"));
+        runCaller.callRun(deployer);
+    }
+
+    function test_eligibilityGuard_productionMode_wrongMinReserveThreshold_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "production");
+        vm.setEnv("MIN_RESERVE_THRESHOLD_WEI", vm.toString(uint256(0.003 ether))); // the canary value
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert();
+        runCaller.callRun(deployer);
+    }
+
+    function test_eligibilityGuard_productionMode_wrongRequiredAbsoluteSeconds_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "production");
+        vm.setEnv("REQUIRED_ABSOLUTE_SECONDS", "60"); // not the real 1800
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert(bytes("production deployment requires REQUIRED_ABSOLUTE_SECONDS=1800"));
+        runCaller.callRun(deployer);
+    }
+
+    /// @notice THE central guard this whole task exists for: an operator cannot accidentally
+    ///         deploy the real public collection with cheap canary eligibility values, even if
+    ///         every other env var is correctly set for a real production deploy.
+    function test_eligibilityGuard_productionMode_exactCanaryValues_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "production");
+        vm.setEnv("MIN_PROGRESS_BPS", "4");
+        vm.setEnv("MIN_RESERVE_THRESHOLD_WEI", vm.toString(uint256(0.003 ether)));
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert(bytes("production deployment requires MIN_PROGRESS_BPS=500"));
+        runCaller.callRun(deployer);
+    }
+
+    function test_eligibilityGuard_productionMode_correctValues_succeeds() public {
+        _setCommonEnv(); // already sets the real production values + DEPLOYMENT_MODE=production
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+        assertEq(d.engine.minProgressBps(), 500);
+        assertEq(d.engine.minReserveThreshold(), 0.229 ether);
+        assertEq(d.engine.requiredAbsoluteSeconds(), 1_800);
+    }
+
+    /// @notice The reverse mistake: a "canary" deployment secretly configured with the exact
+    ///         real production thresholds would defeat the entire point of a cheap test cycle -
+    ///         also rejected.
+    function test_eligibilityGuard_canaryMode_exactProductionValues_reverts() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "canary");
+        // MIN_PROGRESS_BPS/MIN_RESERVE_THRESHOLD_WEI already at the exact production values from
+        // _setCommonEnv() - a canary run that forgot to actually lower them.
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        vm.expectRevert();
+        runCaller.callRun(deployer);
+    }
+
+    function test_eligibilityGuard_canaryMode_genuinelyCheapValues_succeeds() public {
+        _setCommonEnv();
+        vm.setEnv("TIMELOCK_DELAY_SECONDS", "0");
+        vm.setEnv("DEPLOYMENT_MODE", "canary");
+        vm.setEnv("MIN_PROGRESS_BPS", "4");
+        vm.setEnv("MIN_RESERVE_THRESHOLD_WEI", vm.toString(uint256(0.003 ether)));
+        // REQUIRED_ABSOLUTE_SECONDS deliberately left at the real 1800 - the task's own
+        // instruction to keep real timing/keeper logic under test even in the canary.
+        DeployRobinhoodChain deployer = new DeployRobinhoodChain();
+        DeployRobinhoodChain.Deployment memory d = runCaller.callRun(deployer);
+        assertEq(d.engine.minProgressBps(), 4);
+        assertEq(d.engine.minReserveThreshold(), 0.003 ether);
+        assertEq(d.engine.requiredAbsoluteSeconds(), 1_800);
     }
 }

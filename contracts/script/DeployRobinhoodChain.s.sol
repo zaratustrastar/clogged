@@ -90,6 +90,35 @@ contract DeployRobinhoodChain is Script {
         // msg.sender. See the contract-level governance-topology note above for why.
         address governanceProposer = vm.envAddress("GOVERNANCE_PROPOSER_ADDRESS");
 
+        // EligibilityRegistry's three eligibility parameters (see its own docs on why these are
+        // immutable constructor config, not hardcoded constants) -- required, no defaults, no
+        // fallback. An operator who forgets any of these gets a clear revert here, never a
+        // silently-wrong value baked into a live deployment.
+        uint256 minProgressBps = vm.envUint("MIN_PROGRESS_BPS");
+        uint256 minReserveThresholdWei = vm.envUint("MIN_RESERVE_THRESHOLD_WEI");
+        uint256 requiredAbsoluteSeconds = vm.envUint("REQUIRED_ABSOLUTE_SECONDS");
+        // The single guard standing between an operator's mistake and accidentally deploying
+        // the real public collection with cheap canary qualification thresholds, or vice versa
+        // (a "canary" that's secretly configured exactly like production, defeating the entire
+        // point of a cheap test cycle). Required, no default -- there is no third, implicit mode.
+        string memory deploymentMode = vm.envString("DEPLOYMENT_MODE"); // "canary" | "production"
+        bytes32 modeHash = keccak256(bytes(deploymentMode));
+        if (modeHash == keccak256(bytes("production"))) {
+            require(minProgressBps == 500, "production deployment requires MIN_PROGRESS_BPS=500");
+            require(
+                minReserveThresholdWei == 0.229 ether,
+                "production deployment requires MIN_RESERVE_THRESHOLD_WEI=0.229 ether (229000000000000000 wei)"
+            );
+            require(requiredAbsoluteSeconds == 1_800, "production deployment requires REQUIRED_ABSOLUTE_SECONDS=1800");
+        } else if (modeHash == keccak256(bytes("canary"))) {
+            require(
+                !(minProgressBps == 500 && minReserveThresholdWei == 0.229 ether),
+                "DEPLOYMENT_MODE=canary but eligibility values exactly match production - set intentionally cheap canary values (e.g. MIN_PROGRESS_BPS=4, MIN_RESERVE_THRESHOLD_WEI=0.003 ether), or use DEPLOYMENT_MODE=production instead"
+            );
+        } else {
+            revert('DEPLOYMENT_MODE must be exactly "canary" or "production"');
+        }
+
         vm.startBroadcast();
 
         // Timelock first: it becomes "governance" for everything deployed after it. Admin role
@@ -108,7 +137,7 @@ contract DeployRobinhoodChain is Script {
         // engine and provider are deployed first (deployer authorized to wire RoundManager back
         // via a one-time setter), RoundManager second using their real, already-known addresses
         // directly. No CREATE-nonce address prediction anywhere in this flow.
-        d.engine = new EligibilityRegistry(msg.sender);
+        d.engine = new EligibilityRegistry(msg.sender, minProgressBps, minReserveThresholdWei, requiredAbsoluteSeconds);
         d.randomnessProvider =
             new ChainlinkRandomnessProvider(ccipRouter, arbitrumChainSelector, governance, msg.sender);
         d.roundManager = new RoundManager(address(d.engine), address(d.randomnessProvider), governance);

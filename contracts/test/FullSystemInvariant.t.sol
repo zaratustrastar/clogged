@@ -41,7 +41,7 @@ contract FullSystemInvariantTest is Test {
 
     function setUp() public {
         provider = new MockRandomnessProvider();
-        engine = new EligibilityRegistry(address(this));
+        engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         rm = new RoundManager(address(engine), address(provider), governance);
         engine.setRoundManager(address(rm));
         provider.setRoundManager(address(rm));
@@ -235,7 +235,7 @@ contract FullSystemInvariantTest is Test {
     ///         current on-chain state -- no ghost snapshot needed, since this must hold at every
     ///         single point in time, not just across a before/after comparison.
     function invariant_reserveStateNeverDivergesFromEligibilityTimer() public view {
-        uint256 threshold = engine.MIN_RESERVE_THRESHOLD();
+        uint256 threshold = engine.minReserveThreshold();
         for (uint256 i = 0; i < 3; i++) {
             BondingCurveClog m = handler.markets(i);
             uint256 tokenId = handler.tokenIds(i);

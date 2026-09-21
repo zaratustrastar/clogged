@@ -36,7 +36,7 @@ contract BondingCurveClogTest is Test {
         token = new MemeToken("Cat", "CAT", address(this));
         virtualEthSeed = (5e9 * virtualTokenSeed) / 1e18; // P0 = 5e-9 ETH/token, scaled
 
-        EligibilityRegistry engine = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
 
         market = new BondingCurveClog(
             address(token), address(tickerNFT), 1, multisig, winnerPot, governance, address(engine), virtualEthSeed, BUFFER_BPS
@@ -223,7 +223,7 @@ contract BondingCurveClogTest is Test {
         MockTickerNFT tickerNFT2 = new MockTickerNFT();
         tickerNFT2.setOwner(1, address(badOwner));
         MemeToken token2 = new MemeToken("Dog", "DOG", address(this));
-        EligibilityRegistry engine2 = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine2 = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         BondingCurveClog market2 = new BondingCurveClog(
             address(token2), address(tickerNFT2), 1, multisig, winnerPot, governance, address(engine2), virtualEthSeed, BUFFER_BPS
         );

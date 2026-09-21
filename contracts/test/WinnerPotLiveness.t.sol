@@ -57,7 +57,7 @@ contract WinnerPotLivenessTest is Test {
         MockTickerNFT tickerNFT = new MockTickerNFT();
         token = new MemeToken("Cat", "CAT", address(this));
         tickerNFT.setOwner(1, ticketOwner);
-        EligibilityRegistry engine = new EligibilityRegistry(address(this));
+        EligibilityRegistry engine = new EligibilityRegistry(address(this), 500, 0.229 ether, 1_800);
         market = new BondingCurveClog(
             address(token), address(tickerNFT), 1, multisig, address(vault), governance, address(engine), virtualEthSeed, BUFFER_BPS
         );
