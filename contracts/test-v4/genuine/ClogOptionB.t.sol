@@ -15,7 +15,7 @@ import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 import {ClogMarket} from "../../src-v4/ClogMarket.sol"; // LEGACY, untouched - divergence reference
-import {ClogGenuineMarket} from "../../src-v4/genuine/ClogGenuineMarket.sol";
+
 import {ClogGenuineLiquidityHook} from "../../src-v4/genuine/ClogGenuineLiquidityHook.sol";
 import {ClogGenuineMath} from "../../src-v4/genuine/ClogGenuineMath.sol";
 import {MemeToken} from "../../src/MemeToken.sol";
@@ -65,8 +65,8 @@ contract ClogOptionBTest is Test {
     PoolSwapTest swapRouter;
 
     MemeToken token;
-    ClogGenuineMarket market; // v4-native, drives execution
-    ClogMarket legacy; // legacy continuous curve, reference only
+    ClogMarket market; // UNCHANGED ClogMarket drives execution
+    ClogMarket legacy; // second unchanged instance, stepped identically as reference
     PoolKey key;
     PoolId pid;
 
@@ -101,7 +101,7 @@ contract ClogOptionBTest is Test {
         swapRouter = new PoolSwapTest(IPoolManager(address(manager)));
 
         token = new MemeToken("OptB", "OPTB", address(this));
-        market = new ClogGenuineMarket(
+        market = new ClogMarket(
             address(hook), address(token), address(tickerNFT), TOKEN_ID, multisig, SEED, BUFFER,
             address(new NoopEligibility())
         );
@@ -122,6 +122,10 @@ contract ClogOptionBTest is Test {
         tickerNFT.mint(owner, TOKEN_ID);
 
         hook.registerPool(key, address(market), SEED);
+        // Initialise AT the highest of the four upper bounds, so every position starts above
+        // its range and is 100% token: zero protocol ETH. This is the same shape the live Klik
+        // pool ships (init tick 184,216 > tickUpper 184,200). The first buy walks the price down
+        // into the range naturally.
         manager.initialize(key, ClogGenuineMath.sqrtPriceX96Of(market.re(), market.rt()));
         hook.launch(key, market.re(), market.rt());
 
@@ -171,6 +175,37 @@ contract ClogOptionBTest is Test {
     function _invariants() internal view {
         assertEq(market.re() - market.realETH(), SEED, "re - realETH != virtualEthSeed");
         assertEq(market.rt() - market.physicalInventory(), VT_OFFSET, "rt - physInv != 800M");
+    }
+
+    /// @dev Aggregate virtual offsets of the four positions must be EXACTLY 9 ETH and 800M.
+    function _assertOffsets() internal view {
+        ClogGenuineMath.Quad[4] memory q =
+            ClogGenuineMath.fourPositions(market.re(), market.rt(), SEED, VT_OFFSET);
+        uint256 eth;
+        uint256 tok;
+        for (uint256 i = 0; i < 4; i++) {
+            uint160 a = TickMath.getSqrtPriceAtTick(q[i].tickLower);
+            uint160 b = TickMath.getSqrtPriceAtTick(q[i].tickUpper);
+            eth += (uint256(q[i].liquidity) * (1 << 96)) / b;
+            tok += (uint256(q[i].liquidity) * a) / (1 << 96);
+        }
+        // integer margins, so only floor-level slack is permitted
+        assertApproxEqAbs(eth, SEED, 1e9, "aggregate ETH offset != 9 ether");
+        assertApproxEqAbs(tok, VT_OFFSET, 1e18, "aggregate token offset != 800M");
+    }
+
+    function _assertExact() internal view {
+        assertEq(market.re(), legacy.re(), "re");
+        assertEq(market.rt(), legacy.rt(), "rt");
+        assertEq(market.k(), legacy.k(), "k");
+        assertEq(market.realETH(), legacy.realETH(), "realETH");
+        assertEq(market.sold(), legacy.sold(), "sold");
+        assertEq(market.hwm(), legacy.hwm(), "hwm");
+        assertEq(market.clogRemaining(), legacy.clogRemaining(), "clogRemaining");
+        assertEq(market.rtCeiling(), legacy.rtCeiling(), "rtCeiling");
+        assertEq(market.physicalInventory(), legacy.physicalInventory(), "physicalInventory");
+        assertEq(market.pendingWithdrawals(owner), legacy.pendingWithdrawals(owner), "owner liability");
+        assertEq(market.pendingWithdrawals(multisig), legacy.pendingWithdrawals(multisig), "multisig liability");
     }
 
     /// @dev Requirement 4: physical balances must reconcile after every trade.
@@ -321,34 +356,23 @@ contract ClogOptionBTest is Test {
 
     function extSell(uint256 a) external { _sell(a); }
 
-    /// @notice Divergence from the LEGACY continuous curve, measured on the real PoolManager.
-    function test_divergenceVsLegacy() public {
-        uint256 mo;
-        for (uint256 i = 0; i < 10; i++) {
+    /// @notice EXACT differential against the unchanged reference, plus the two offsets.
+    function test_exactDifferential() public {
+        for (uint256 i = 0; i < 8; i++) {
             uint256 amt = 0.4 ether;
-            (uint256 legacyOut,) = legacy.applyBuy(amt);
-            uint256 actualOut = _buy(amt);
-            uint256 d = _rel(legacyOut, actualOut);
-            if (d > mo) mo = d;
+            (uint256 want,) = legacy.applyBuy(amt);
+            uint256 got = _buy(amt);
+            assertEq(got, want, "user output must equal the unchanged reference EXACTLY");
+            _assertExact();
+            _invariants();
+            _assertOffsets();
         }
-        uint256 pLegacy = (legacy.re() * 1e18) / legacy.rt();
-        uint256 pActual = (market.re() * 1e18) / market.rt();
-        uint256 pd = _rel(pLegacy, pActual);
-
-        uint256 cl = 100_000_000e18 - legacy.clogRemaining();
-        uint256 ca = 100_000_000e18 - market.clogRemaining();
-        uint256 cd = _rel(cl, ca);
-
-        uint256 tl = legacy.pendingWithdrawals(owner) + legacy.pendingWithdrawals(multisig);
-        uint256 ta = market.pendingWithdrawals(owner) + market.pendingWithdrawals(multisig);
-        uint256 td = _rel(tl, ta);
-
-        emit log_named_decimal_uint("max user-output divergence", mo, 18);
-        emit log_named_decimal_uint("price divergence", pd, 18);
-        emit log_named_decimal_uint("CLOG released divergence", cd, 18);
-        emit log_named_decimal_uint("tax/liability divergence", td, 18);
-
-        assertLt(mo, 1e15, "user output divergence > 0.1%");
-        assertLt(pd, 1e15, "price divergence > 0.1%");
+        uint256 sellAmt = token.balanceOf(trader) / 3;
+        (uint256 wantNet,,) = legacy.applySell(sellAmt);
+        uint256 gotNet = _sell(sellAmt);
+        assertEq(gotNet, wantNet, "sell payout must equal the reference EXACTLY");
+        _assertExact();
+        _invariants();
+        _assertOffsets();
     }
 }

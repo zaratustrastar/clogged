@@ -70,6 +70,13 @@ library ClogGenuineMath {
     error PriceOutOfRange();
     error DegenerateState();
 
+    /// @notice One of the four protocol-owned positions of the 2x2 interpolation.
+    struct Quad {
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
+    }
+
     struct Position {
         uint128 liquidity;
         uint160 sqrtPaX96;
@@ -217,6 +224,97 @@ library ClogGenuineMath {
         }
     }
 
+    /// @notice EXACT representation of canonical (re, rt) as FOUR protocol-owned positions on
+    ///         the same pool, using the two neighbouring Pa ticks x the two neighbouring Pb ticks.
+    ///
+    ///   A single position cannot work: three constraints
+    ///       SUM Li = sqrt(re*rt),   SUM Li/sqrt(Pb_i) = virtualEthSeed,   SUM Li*sqrt(Pa_i) = VT
+    ///   against one free weight. Two positions give two weights against three constraints and
+    ///   are still over-determined. Three are square but can demand a negative weight. The 2x2
+    ///   product always works and all four weights are nonnegative.
+    ///
+    ///   The margins are solved in INTEGERS so both offsets are exact rather than interpolated:
+    ///       LA_h = L * (VT   - g_l) / (g_h - g_l)      g_x = L*sqrt(Pa_x)   (token offset if all L at x)
+    ///       LB_h = L * (f_l - vEth) / (f_l - f_h)      f_x = L/sqrt(Pb_x)   (ETH offset if all L at x)
+    ///   then the 2x2 table is filled so that BOTH margins hold exactly:
+    ///       L_hh = LA_h*LB_h/L,  L_hl = LA_h - L_hh,  L_lh = LB_h - L_hh,
+    ///       L_ll = L - LA_h - LB_h + L_hh
+    ///   Consequently the aggregate ACTUAL reserves land on realETH and physicalInventory with
+    ///   no residual at all:
+    ///       SUM actualETH = L/sqrt(P) - virtualEthSeed = re - virtualEthSeed = realETH
+    ///       SUM actualTok = L*sqrt(P) - VT             = rt - VT             = physicalInventory
+    struct QuadCtx {
+        uint256 L;
+        int24 al;
+        int24 bl;
+        uint160 Al;
+        uint160 Ah;
+        uint160 Bl;
+        uint160 Bh;
+    }
+
+    function _quadCtx(uint256 re, uint256 rt, uint256 vEth, uint256 vTok)
+        private
+        pure
+        returns (QuadCtx memory c)
+    {
+        c.L = liquidityOf(re, rt);
+        if (c.L == 0) revert DegenerateState();
+        uint256 sqrtPb = Math.mulDiv(c.L, Q96, vEth);
+        uint256 sqrtPa = Math.mulDiv(vTok, Q96, c.L);
+        if (sqrtPa < TickMath.MIN_SQRT_PRICE || sqrtPb > TickMath.MAX_SQRT_PRICE) revert PriceOutOfRange();
+        c.al = TickMath.getTickAtSqrtPrice(uint160(sqrtPa));
+        c.bl = TickMath.getTickAtSqrtPrice(uint160(sqrtPb));
+        c.Al = TickMath.getSqrtPriceAtTick(c.al);
+        c.Ah = TickMath.getSqrtPriceAtTick(c.al + 1);
+        c.Bl = TickMath.getSqrtPriceAtTick(c.bl);
+        c.Bh = TickMath.getSqrtPriceAtTick(c.bl + 1);
+    }
+
+    /// @notice EXACT representation of canonical (re, rt) as FOUR protocol-owned positions on the
+    ///         same pool: the two neighbouring Pa ticks x the two neighbouring Pb ticks.
+    ///
+    ///   One position cannot satisfy three constraints with one weight; two are over-determined;
+    ///   three are square but can demand a negative weight. The 2x2 product always works with
+    ///   nonnegative weights. Margins are solved in INTEGERS so BOTH offsets are exact:
+    ///       LA_h = L*(vTok - g_l)/(g_h - g_l),   g_x = L*sqrt(Pa_x)
+    ///       LB_h = L*(f_l - vEth)/(f_l - f_h),   f_x = L/sqrt(Pb_x)
+    ///   and the table is filled so both margins hold exactly. The aggregate ACTUAL reserves then
+    ///   land on realETH and physicalInventory with no residual.
+    function fourPositions(uint256 re, uint256 rt, uint256 vEth, uint256 vTok)
+        internal
+        pure
+        returns (Quad[4] memory q)
+    {
+        QuadCtx memory c = _quadCtx(re, rt, vEth, vTok);
+        uint256 LAh;
+        uint256 LBh;
+        {
+            uint256 gl = Math.mulDiv(c.L, c.Al, Q96);
+            uint256 gh = Math.mulDiv(c.L, c.Ah, Q96);
+            LAh = (gh > gl && vTok > gl) ? Math.mulDiv(c.L, vTok - gl, gh - gl) : 0;
+            if (LAh > c.L) LAh = c.L;
+        }
+        {
+            uint256 fl = Math.mulDiv(c.L, Q96, c.Bl);
+            uint256 fh = Math.mulDiv(c.L, Q96, c.Bh);
+            LBh = (fl > fh && fl > vEth) ? Math.mulDiv(c.L, fl - vEth, fl - fh) : 0;
+            if (LBh > c.L) LBh = c.L;
+        }
+
+        uint256 hh = Math.mulDiv(LAh, LBh, c.L);
+        uint256 lo = LAh + LBh > c.L ? LAh + LBh - c.L : 0;
+        uint256 hi = LAh < LBh ? LAh : LBh;
+        if (hh < lo) hh = lo;
+        if (hh > hi) hh = hi;
+
+        q[0] = Quad(c.al + 1, c.bl + 1, uint128(hh));
+        q[1] = Quad(c.al + 1, c.bl, uint128(LAh - hh));
+        q[2] = Quad(c.al, c.bl + 1, uint128(LBh - hh));
+        // (L + hh) first: `L - LAh - LBh + hh` underflows left-to-right when LAh + LBh > L
+        q[3] = Quad(c.al, c.bl, uint128((c.L + hh) - LAh - LBh));
+    }
+
     function _ceilTo(int24 tick, int24 spacing) private pure returns (int24) {
         if (spacing <= 1) return tick;
         int24 q = tick / spacing;
@@ -231,3 +329,4 @@ library ClogGenuineMath {
         return q * spacing;
     }
 }
+
