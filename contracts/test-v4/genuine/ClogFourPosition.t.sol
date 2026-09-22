@@ -15,8 +15,9 @@ import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 import {ClogMarket} from "../../src-v4/ClogMarket.sol"; // LEGACY, untouched - divergence reference
-import {ClogGenuineMarket} from "../../src-v4/genuine/ClogGenuineMarket.sol";
 import {ClogGenuineLiquidityHook} from "../../src-v4/genuine/ClogGenuineLiquidityHook.sol";
+import {ClogFourPositionMath} from "../../src-v4/genuine/ClogFourPositionMath.sol";
+import {ClogFourPositionMath as FP} from "../../src-v4/genuine/ClogFourPositionMath.sol";
 import {ClogGenuineMath} from "../../src-v4/genuine/ClogGenuineMath.sol";
 import {MemeToken} from "../../src/MemeToken.sol";
 import {TickerNFT} from "../../src/TickerNFT.sol";
@@ -51,7 +52,7 @@ library HookMinerGenuine {
 ///
 ///         The legacy `ClogMarket` is still instantiated, but ONLY as a reference to measure
 ///         divergence against. It never drives execution.
-contract ClogOptionBTest is Test {
+contract ClogFourPositionTest is Test {
     using StateLibrary for IPoolManager;
 
     uint256 constant SEED = 9 ether;
@@ -63,9 +64,10 @@ contract ClogOptionBTest is Test {
     TickerNFT tickerNFT;
     RewardVault rewardVault;
     PoolSwapTest swapRouter;
+    ClogFourPositionMath geometry;
 
     MemeToken token;
-    ClogGenuineMarket market; // v4-native, drives execution
+    ClogMarket market;
     ClogMarket legacy; // legacy continuous curve, reference only
     PoolKey key;
     PoolId pid;
@@ -87,21 +89,24 @@ contract ClogOptionBTest is Test {
         manager = new PoolManager(address(this));
         tickerNFT = new TickerNFT("B", "B", deployer, "https://x.invalid/", multisig);
 
+        geometry = new ClogFourPositionMath();
         bytes32 h = keccak256(
             abi.encodePacked(
                 type(ClogGenuineLiquidityHook).creationCode,
-                abi.encode(IPoolManager(address(manager)), address(this))
+                abi.encode(IPoolManager(address(manager)), address(this), geometry)
             )
         );
         (, bytes32 salt) = HookMinerGenuine.find(vm, address(this), h, 500_000);
-        hook = new ClogGenuineLiquidityHook{salt: salt}(IPoolManager(address(manager)), address(this));
+        hook = new ClogGenuineLiquidityHook{salt: salt}(
+            IPoolManager(address(manager)), address(this), geometry
+        );
 
         rewardVault = new RewardVault(makeAddr("rm"), address(manager), address(hook));
         hook.setRewardVault(address(rewardVault));
         swapRouter = new PoolSwapTest(IPoolManager(address(manager)));
 
         token = new MemeToken("OptB", "OPTB", address(this));
-        market = new ClogGenuineMarket(
+        market = new ClogMarket(
             address(hook), address(token), address(tickerNFT), TOKEN_ID, multisig, SEED, BUFFER,
             address(new NoopEligibility())
         );
