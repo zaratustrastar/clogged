@@ -11,6 +11,8 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
+import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {ClogMarket} from "../ClogMarket.sol";
 import {ClogGenuineMath} from "./ClogGenuineMath.sol";
 
@@ -317,10 +319,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
             unspecified = int128(int256(coreEth) - int256(p.canonicalOut));
         }
 
-        // ── 2. re-anchor the protocol position onto the new canonical state ──
-        BalanceDelta net = _reanchor(key, ps, p);
-
-        // ── 3. resolve R = burn + mint + hookDelta ──
+        // ── 2. hook delta, known before the re-anchor so the mint can be sized against it ──
         int128 hd0;
         int128 hd1;
         if (p.isBuy) {
@@ -331,12 +330,15 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
             hd0 = unspecified;
             hd1 = int128(uint128(p.absorbed));
         }
+
+        // ── 3. re-anchor the protocol position onto the new canonical state ──
+        BalanceDelta net = _reanchor(key, ps, p, hd0);
         _resolve(key, id, int256(net.amount0()) + int256(hd0), int256(net.amount1()) + int256(hd1), p);
 
         return (IHooks.afterSwap.selector, unspecified);
     }
 
-    function _reanchor(PoolKey calldata key, PoolState storage ps, Pending memory p)
+    function _reanchor(PoolKey calldata key, PoolState storage ps, Pending memory p, int128 hd0)
         internal
         returns (BalanceDelta net)
     {
@@ -357,6 +359,38 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
             net = net + burnDelta;
         }
 
+        // ── ZERO-LIQUIDITY PRICE TRAVERSAL ──────────────────────────────────────────────
+        // The old position is now burned, so the pool holds NO liquidity at any tick. In that
+        // state SwapMath.computeSwapStep returns amountIn == 0 (getAmountXDelta with liquidity
+        // 0 is 0), so `amountRemainingLessFee >= amountIn` holds and the step sets
+        // sqrtPriceNextX96 = sqrtPriceTargetX96. A swap therefore walks the price to
+        // sqrtPriceLimitX96 exchanging NOTHING and returning a zero BalanceDelta.
+        //
+        // This is what makes capped sells representable without a single wei of protocol ETH.
+        // A capped sell ends canonically at re1 == virtualEthSeed and realETH1 == 0, i.e. price
+        // == the NEW position's upper bound Pb_new. The user's core swap can only reach the OLD
+        // bound Pb_old (that is where the old position's real ETH runs out), and Pb_new > Pb_old
+        // - measured ratio 1.1277. Minting the new position while slot0 still sat at Pb_old put
+        // the price INSIDE the new range, so the position demanded 0.557 ETH of real reserves:
+        // the EthResidualExhausted(0.553 ether, 0) revert. It was never a funding problem.
+        //
+        // Moving slot0 to Pb_new BEFORE the mint puts the price exactly at the new upper bound,
+        // where a position is 100% token and needs ZERO ETH. The hook self-calls swap, and
+        // Hooks.sol:252/292 skip beforeSwap/afterSwap when msg.sender == address(self), so this
+        // cannot recurse. It is not a calibration swap: it exchanges nothing and exists only
+        // because the burn left the pool empty.
+        _traverseToCanonical(key, p.re1, p.rt1);
+
+        // Cap the new position's liquidity so it can never demand MORE real ETH than canonical
+        // realETH1. tickUpper must round DOWN (otherwise the token-only launch price would sit
+        // inside the range and require ETH), which makes the rounded position hold slightly
+        // more ETH than canonical at the same price - a few e13 wei. The fuzzer hit exactly
+        // that: EthResidualExhausted(9.48e13, 0).
+        //
+        // Scaling L is safe ONLY because _traverseToCanonical now pins slot0 to the canonical
+        // price independently of L, and the user's output is reconciled exactly by the afterSwap
+        // delta. Position amounts are linear in L for fixed geometry, so the scale factor is
+        // exact. The reduction is ~1e-5 relative and never touches CLOG state.
         (BalanceDelta mintDelta,) = poolManager.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams({
@@ -372,6 +406,24 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         ps.tickLower = np.tickLower;
         ps.tickUpper = np.tickUpper;
         ps.liquidity = np.liquidity;
+    }
+
+    /// @dev Walk slot0 to the canonical price across an EMPTY pool. Must be called only after
+    ///      the old position has been burned, so that liquidity is zero at every tick and the
+    ///      swap exchanges nothing. Returns a zero BalanceDelta by construction.
+    function _traverseToCanonical(PoolKey calldata key, uint256 re1, uint256 rt1) internal {
+        uint160 target = ClogGenuineMath.sqrtPriceX96Of(re1, rt1);
+        (uint160 cur,,,) = poolManager.getSlot0(key.toId());
+        if (cur == target) return;
+        poolManager.swap(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: cur > target,
+                amountSpecified: -1,
+                sqrtPriceLimitX96: target
+            }),
+            ""
+        );
     }
 
     /// @dev Discharge the hook's net position. R > 0 means the manager owes the hook; the ETH

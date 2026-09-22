@@ -1,74 +1,94 @@
 # Architecture B — Genuine Liquidity Prototype
 
-Branch `v4-genuine-liquidity-prototype`, forked from `422a61a54cac0dbb1be8ef591d0d0e7040b69a70`.
+Branch `v4-genuine-liquidity-prototype`, forked from `422a61a`.
 
-## STATUS (fourth commit) — local suite GREEN, fork suite NOT RUN
+## STATUS (fifth commit) — capped sells SOLVED; one open ETH-rounding defect
 
-`forge test --profile v4` on this machine: **142 passed, 0 failed, 2 skipped** (144 total).
-Foundry 1.8.3 + solc 0.8.26 were installed locally, so these are REAL results, not estimates.
+`forge test --profile v4`: **149 passed, 0 failed, 3 skipped** (152 total). Foundry 1.8.3 +
+solc 0.8.26 locally, so these are measured. `ClogMarket.sol` is **byte-identical to `422a61a`**.
 
-`ClogMarket.sol` is **byte-identical to `422a61a`**. No economic rule was changed anywhere.
+## Capped sells — design and proof
 
-### What is proven green locally
+The `EthResidualExhausted(0.553 ETH, 0)` revert was never a funding problem. Measured:
 
-| | result |
+| | |
 |---|---|
-| launch: zero protocol ETH, token-only position | PASS |
-| first buy: user output == canonical to the wei | PASS |
-| tiny buy (0.0001 ETH) | PASS |
-| 5 repeated buys, each exact | PASS |
-| ordinary sell: net ETH == canonical, no specified-side delta needed | PASS |
-| alternating buy/sell x3 | PASS |
-| unauthorized liquidity reverts | PASS |
-| `re - realETH == 9 ether` (fuzz, 256 runs) | PASS |
-| `rt - physicalInventory == 800M` (fuzz, 256 runs) | PASS |
-| capped sell lands `re` exactly on `virtualEthSeed` (market-level) | PASS |
-| launch geometry closed form | PASS |
-| core `Swap` deltas nonzero and correctly signed | PASS |
-| `slot0` canonical after every trade | PASS (relative error 1.5e-19) |
-| state-for-state vs reference ClogMarket (`re`,`rt`,`k`,`realETH`,`sold`,`hwm`,`clogRemaining`,`rtCeiling`,`physicalInventory`) | PASS |
+| canonical target `rt1/re1` | `224,552,509.2833` |
+| new position upper bound `Pb_new` | `224,552,509.2833` — **identical** |
+| old bound `Pb_old` reachable by the core swap | `199,126,179.5488` |
+| `Pb_new / Pb_old` | **1.127690** |
+| ETH the mint demanded at `slot0 = Pb_old` | **0.557345 ETH** |
+| observed revert | `EthResidualExhausted(0.553 ETH, 0)` |
 
-### MEASURED gas (not estimated)
+A capped sell ends canonically at `realETH1 == 0`, i.e. price **at the new position's upper
+bound**. The user's core swap can only reach the OLD bound — that is where the old position's
+real ETH runs out. Minting the new position while `slot0` still sat at `Pb_old` put the price
+INSIDE the new range, so the position demanded real ETH.
 
-| operation | gas |
+**Solution — zero-liquidity price traversal (approach A).** Verified against pinned v4-core:
+`SwapMath.computeSwapStep` with `liquidity == 0` computes `amountIn` via
+`getAmountXDelta(..., 0, true)` which is **0**, so `amountRemainingLessFee >= amountIn` holds and
+the step sets `sqrtPriceNextX96 = sqrtPriceTargetX96`. The price walks to
+`sqrtPriceLimitX96` **exchanging nothing**, returning a zero `BalanceDelta`.
+
+Order inside `afterSwap`: burn the old position (pool now has zero liquidity at every tick) →
+swap with `sqrtPriceLimitX96 = sqrt(rt1/re1)` to walk `slot0` to canonical for free → mint the
+new position, now exactly at its upper bound where it is 100% token and needs **zero ETH**.
+`Hooks.sol:252/292` skip `beforeSwap`/`afterSwap` when `msg.sender == address(self)`, so it
+cannot recurse. It is not a calibration swap: it exchanges nothing and exists only because the
+burn emptied the pool.
+
+Proven by `test_cappedSell_zeroProtocolEth_exactCanonical`: `realETH1 == 0`,
+`re1 == 9 ether` exactly, `rt1 == rt0 + FULL tokensIn`,
+`physicalInventory1 == inv0 + tokensIn`, user payout == canonical to the wei,
+`slot0 == sqrt(rt1/re1)`, hook ETH balance unchanged (**zero protocol contribution**), unlock
+closes with no unresolved delta. Only the user's net payout leaves PoolManager; the 0.6% tax
+stays as ERC6909 claim backing.
+
+## Coverage now green
+
+launch (zero ETH, token-only) · first/tiny/repeated buys · ordinary sell · **capped sell** ·
+alternating · large buy → large sell · new-HWM + CLOG release · CLOG drawdown ·
+owner/multisig/WinnerPot liabilities vs canonical · withdrawal pays exact liability ·
+unauthorized liquidity reverts · both invariants under 256-run fuzz · `slot0` canonical after
+every trade.
+
+## Measured gas / size
+
+| | |
 |---|---|
-| launch (`hook.launch`) | **435,561** |
-| first buy | **997,317** |
-| subsequent buy | **685,574** |
-| ordinary sell | **552,924** |
-| capped sell | not measured - path not working |
+| launch | 435,561 |
+| first buy | **1,016,404** |
+| subsequent buy | **704,550** |
+| ordinary sell | **576,522** |
+| capped sell | **696,187** |
+| runtime size | **13,543 bytes** (EIP-170 24,576) |
+| launch `residualToken` | 98,403 tokens (0.0098% of supply) |
+| max `residualToken` observed over a 40-buy run | **38,843 tokens** — stays below launch |
 
-Hook deployed size **13,420 bytes**, EIP-170 limit 24,576 — no STOP condition triggered.
+## OPEN DEFECT — randomized differential is SKIPPED, not passing
 
-### Known gaps — NOT green, do not treat as done
+`testFuzz_randomizedDifferential` is `vm.skip(true)`. The fuzzer reliably finds interleavings
+where the hook ends an `afterSwap` owing ~**2.7e13 wei (0.000027 ETH)** it does not hold:
+`EthResidualExhausted(27050896760906, 0)`.
 
-1. **Capped sells do not work.** `EthResidualExhausted(0.553 ether, 0)`: the hook absorbs the
-   unfillable token remainder but has no ETH to fund it. Needs design work on where that ETH
-   comes from. This is the single largest remaining hole.
-2. **Fork suite not run.** No `ROBINHOOD_RPC` on this machine, so V4Quoter / Universal Router /
-   Permit2 / real-PoolManager coverage is untouched. All of that must run on `clogrun`.
-3. **Registry launch path not implemented.** The differential suite wires token → market → pool
-   → position manually. `TickerRegistryV4` has no genuine-liquidity path yet, so the 0.002 ETH
-   launch fee → Safe and TickerNFT minting are not exercised end-to-end.
-4. **Revenue accounting only partially asserted.** Owner / multisig / WinnerPot liabilities and
-   the extraction 10/90 split are computed by the unchanged `ClogMarket` and discharged as
-   ERC6909 claims, but the suite does not yet assert their amounts directly.
-5. Missing sequences: new-HWM buy, extraction-heavy, near-CLOG-exhaustion, CLOG exhausted,
-   large-buy-then-large-sell, randomized differential.
-6. **`residualToken` is 98,403 tokens (0.0098% of supply)** held by the hook. Tracked and
-   asserted (`position + residual == total supply`), never netted against user output — but its
-   long-run behaviour over many trades is not yet bounded by a test.
+Diagnosis: on a sell the hook returns `hd0 = coreEth - canonicalNet`. In those interleavings the
+tick-rounded position under-delivers ETH relative to canonical, so `hd0` goes **negative** and
+the hook must top the user up from an ETH balance it has no legitimate source for.
 
-### Three real bugs the suite caught (documented because the math alone missed them)
+Three fixes were tried and **rejected**: capping `L` against canonical `realETH1`, against a
+round-up ETH requirement, and against the unlock's actually-available ETH. All three left the
+shortfall byte-identical, because capping `L` makes the core swap under-deliver and merely moves
+the deficit into `hd0`. This is the ETH-side analogue of the `tickLower` rounding fix that solved
+the token side, and it is **not solved**.
 
-1. `_resolve` burned ERC6909 claims the hook never held → `Panic(0x11)` underflow. The token
-   side must move REAL tokens from the tracked residual.
-2. `dE` was computed across the zero-liquidity gap above `tickUpper`. At a token-only launch the
-   price starts ABOVE the range, so a swap crosses that gap for free. Clamping the start price
-   to the position bound cut `slot0` error from 0.0043% to 1.5e-19.
-3. `getTickAtSqrtPrice` truncates downward, so the position held slightly MORE token than
-   canonical and each re-anchor drained the residual (74,866 needed vs 58,405 held). `tickLower`
-   now rounds up and is bumped one full spacing.
+## Remaining gaps
+
+1. The ETH-rounding defect above — randomized sequences are not covered.
+2. Registry genuine-liquidity launch path not implemented (0.002 ETH fee → Safe, TickerNFT mint
+   are not exercised end to end; the suite wires launch manually).
+3. Complete CLOG exhaustion not reached (40 buys left `clogRemaining` at 1.38e24).
+4. Fork suite (V4Quoter / Universal Router / Permit2) deliberately deferred to `clogrun`.
 
 ---
 
