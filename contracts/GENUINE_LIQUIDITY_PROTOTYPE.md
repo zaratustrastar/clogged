@@ -1,0 +1,241 @@
+# Architecture B — Genuine Liquidity Prototype
+
+Branch `v4-genuine-liquidity-prototype`, forked from `422a61a54cac0dbb1be8ef591d0d0e7040b69a70`.
+
+**Status: NOT COMPILED, NOT TESTED, NOT DEPLOYED.** No Foundry was available on the machine
+that wrote this. Every numeric claim below comes from `reference/clog_reference_model.py`, an
+exact floor-integer Python port of `ClogMarket.sol @ 422a61a`. Nothing here has been checked by
+`solc`. Assume compile errors.
+
+`ClogMarket.sol` is **unmodified** on this branch. It is byte-identical to `422a61a`.
+
+---
+
+## 1. Orientation (corrected)
+
+`currency0 = native ETH`, `currency1 = token`, so the v4 price is `P = amount1/amount0 = token/ETH`.
+A token-only launch therefore sits at the **upper** bound. For a position `[Pa, Pb]`, liquidity `L`:
+
+```
+re = actualETH   + L / sqrt(Pb)
+rt = actualToken + L * sqrt(Pa)
+re * rt = L^2
+```
+
+At launch `actualETH = 0` ⟹ `P0 = Pb`. Solving with `Q` = physical tokens deposited:
+
+```
+L  = sqrt(re0 * rt0)
+Pb = rt0 / re0
+Pa = (rt0 - Q)^2 / (re0 * rt0)
+```
+
+Verified numerically for `virtualEthSeed = 9 ETH`, `bufferBps = 20_000`, `Q = 1B`:
+
+| quantity | value |
+|---|---|
+| `L` | `1.27279221e23` |
+| `Pb` | `200,000,000` token/ETH |
+| `Pa` | `39,506,172.8395` token/ETH |
+| reconstruction `actualETH` | `0.000e+00` |
+| reconstruction `re` | `9.000000 ETH` (err `1.1e-16`) |
+| reconstruction `rt` | `1,800,000,000.00` (err `0`) |
+
+---
+
+## 2. The two invariants
+
+```
+re - realETH           == virtualEthSeed        == 9 ether
+rt - physicalInventory == VIRTUAL_TOKEN_OFFSET  == 800_000_000e18
+```
+
+Proof by inspection of every mutation in `ClogMarket`: `re` and `realETH` always move by the
+same signed amount (leg 1, leg 2, `dust`, `clogExtracted`, sell payout); `rt` and
+`physicalInventory` always move by the same signed amount (`curveTokens + clogTokens` on a buy,
+`tokensIn` on a sell). Neither `dust` nor `clogExtracted` touches `rt`.
+
+**Empirical:** 4,771 randomized buy/sell transitions, **zero violations**.
+
+Consequence — the geometry is a one-parameter family. The virtual offsets are constants, so:
+
+```
+sqrt(Pb) = L / virtualEthSeed
+sqrt(Pa) = VIRTUAL_TOKEN_OFFSET / L
+L        = sqrt(re * rt)
+```
+
+`L` moves only when `k` moves: extraction (down) or a capped sell (up). A pure curve move leaves
+it untouched.
+
+---
+
+## 3. Target-priced core swap (no calibration swap)
+
+On the pre-trade curve the pool's virtual ETH reserve is `L0 / sqrt(P)`. To finish at
+`Ptarget = rt1/re1`:
+
+```
+dE = L0/sqrt(Ptarget) - L0/sqrt(P0)      == v4 getAmount0Delta(sqrtPtarget, sqrtP0, L0)
+```
+
+**Measured (0.5 ETH buys):**
+
+| buy | gross | `dE` (core) | core/gross | hook absorbs |
+|---|---|---|---|---|
+| 1 | 0.5000 | 0.48656393 | **97.3128%** | 0.01343607 |
+| 4 | 0.5000 | 0.48663172 | 97.3263% | 0.01336828 |
+| 8 | 0.5000 | 0.48669778 | **97.3396%** | 0.01330222 |
+
+The core `Swap` event carries ~97.3% of the trade; the hook absorbs only tax + extraction. For
+comparison `UniversalKlikHook` absorbs up to `MAX_FEE_BPS = 125` (1.25%) and Sigma trades it.
+
+The token side needs a reconciling `afterSwap` delta of roughly −1.0M to −1.9M tokens on a ~94M
+output (~2%), because the pool rides `L0` while canonical `k` shrinks by extraction.
+
+### Sells
+
+**Uncapped — proven to need no specified-side delta.** Moving the pool to `sqrtPtarget` consumes
+exactly the user's full token input and pays exactly the canonical gross:
+
+```
+tokens needed by pool = 2,000,000.000000   vs input 2,000,000   (diff +1.6e-7, float noise)
+pool ETH out          = 0.020516636        canonical gross = 0.020516636
+```
+
+`afterSwap` applies only the 0.6% tax.
+
+**Capped — designed explicitly, not inherited.** At `P = Pb` the position holds zero ETH, so
+`re = virtualEthSeed`. `ClogMarket`'s fully-capped sell lands on `re == virtualEthSeed` too:
+
+```
+huge sell: capped=True  realETH after = 0.000000000  re after = 9.000000000
+```
+
+The cap **is** the upper bound. The core swap fills only as far as `Pb`; the hook takes the
+unfilled token remainder as a specified-side delta, pays no ETH for it, and folds it into
+`physicalInventory` on the re-mint.
+
+---
+
+## 4. Tick residual (`fee = 0`, `tickSpacing = 1`, economics unchanged)
+
+`virtualEthSeed = 9 ETH` and `bufferBps = 20_000` are **untouched**. Boundaries are rounded
+conservatively (`tickUpper` down so launch stays token-only with zero ETH; `tickLower` down so
+the range can only be wider than canonical). Residual over 10 re-anchors:
+
+| | ETH residual | token residual |
+|---|---|---|
+| range | `2.0e13` – `4.2e14` wei | `4.1e19` – `4.1e22` |
+| bound | ≈ one tick of `L/sqrt(Pb)` ≈ **0.00045 ETH** | ≈ one tick of `L*sqrt(Pa)` ≈ **40,000 tokens** (0.004% of supply) |
+
+Effect on user output at `tickSpacing = 1`: **−0.002369%** (0.24 bps, 1/250th of the 0.6% tax).
+At spacing 60 it would be −0.142%, at Klik's spacing 200 it would be −0.472%. Spacing 1 is not
+optional.
+
+The residual is held by the hook as `residualEth` / `residualToken`, asserted in tests, and
+never netted silently against user output. Multi-position representation is **not** pursued
+unless the suite shows this residual is material.
+
+---
+
+## 5. Why static LP was rejected
+
+| buy | user token Δ vs canonical | `re` Δ |
+|---|---|---|
+| 1 | 0 (match) | +0.220139% |
+| 2 | −0.208732% | +0.418718% |
+| 10 | **−1.073473%** | +1.502907% |
+
+By buy 10 the error is 1.8× the entire tax. Also: `realETH_static − realETH_clog` equals
+cumulative `clogExtracted` **exactly**, i.e. a static LP cannot extract at all — revenue stays
+trapped and multisig/WinnerPot are never paid.
+
+`dust` was **identically zero** in every path tested (60 sequential buys, `clogRemaining` down to
+27.8M). Extraction is the sole divergence driver. Not proven unreachable in edge cases.
+
+---
+
+## 6. Hook mask
+
+`0x2AC8` → **`0x2ACC`**. Adds `AFTER_SWAP_RETURNS_DELTA` (bit 2), newly required for the
+sell-side tax. Retains `BEFORE_ADD_LIQUIDITY` / `BEFORE_REMOVE_LIQUIDITY`, which Klik's pools do
+not have. New CREATE2 mining required.
+
+---
+
+## 7. What must be run on `clogrun`
+
+Fetch this exact branch; do not merge, do not modify `v4-v2-calibration-candidate`.
+
+```bash
+git fetch origin v4-genuine-liquidity-prototype
+git checkout v4-genuine-liquidity-prototype
+```
+
+### Step 0 — the load-bearing probe, before anything else
+
+```bash
+forge test --profile v4 --fork-url $ROBINHOOD_RPC \
+  --match-path test-v4/genuine/ModifyLiquidityInAfterSwapProbe.t.sol -vvvv
+```
+
+`ProbeHook`'s body is intentionally unimplemented — writing it is the first task. It must answer,
+on the pinned Robinhood v4:
+
+1. Does `modifyLiquidity` inside `afterSwap` revert?
+2. Does the burn+mint move `slot0`?
+3. Does v4 `noSelfCall` skip `beforeAddLiquidity` for the hook's own call?
+4. Does the unlock settle, or does it fail `CurrencyNotSettled`?
+
+**If (1) or (4) fails, Architecture B as written is dead** and must fall back to a deferred /
+keeper re-anchor. Do not build further until this is answered.
+
+### Step 1 — invariants (no fork needed)
+
+```bash
+forge test --profile v4 --match-path test-v4/genuine/ClogGenuineInvariants.t.sol -vv
+```
+
+`setUp()` needs wiring to the same fixtures `test-v4/v2/ClogV4HookV2Production.t.sol` builds.
+
+### Step 2 — differential vs reference
+
+Port `reference/clog_reference_model.py` to a Solidity reference or drive it via FFI, then assert
+state-for-state equality for: user output, `re`, `rt`, `k`, `realETH`, `sold`, `hwm`,
+`clogRemaining`, `rtCeiling`, `physicalInventory`, owner / multisig / WinnerPot credits.
+
+Scenarios: first buy · repeated buys · new-HWM buy · capped-release buy · extraction-heavy buy ·
+ordinary sell · capped sell · alternating · randomized.
+
+### Step 3 — real Robinhood integration
+
+`V4Quoter 0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94` ·
+`UniversalRouter 0x8876789976dEcBfCbBbe364623C63652db8C0904` ·
+`Permit2 0x000000000022D473030F116dDEE9F6B43aC78BA3` ·
+`PoolManager 0x8366a39CC670B4001A1121B8F6A443A643e40951`
+
+Assert: zero-ETH launch · token-only initial position · `getLiquidity > 0` at launch ·
+core `Swap` deltas nonzero and economically meaningful · `slot0 == sqrt(rt/re)` after every trade
+· no second pool · unauthorized `modifyLiquidity` rejected · withdrawal solvency.
+
+### Step 4 — the cheap Sigma falsification (still unrun)
+
+Independently of CLOG: deploy one throwaway token as a plain Klik-shaped pool (one-sided,
+`fee=0`, genuine swap, no CLOG economics). If Sigma trades it, "genuine core swap delta" is
+confirmed as the gating property. If it does not, the cause is elsewhere and this entire
+redesign is premature. **This is the highest information-per-cost test available and it has
+still not been run.**
+
+---
+
+## 8. Known gaps in this commit
+
+- Nothing compiles-checked. `ProbeHook` is a stub by design; `ClogGenuineInvariants.setUp()` is
+  unwired; `ClogGenuineLiquidityHook` has not been reviewed against pinned `v4-core` signatures
+  (`SwapParams` / `ModifyLiquidityParams` namespacing differs across v4 versions).
+- Tax/extraction settlement (`_credit`, `take`/`settle`, ERC-6909 WinnerPot claim) is **not**
+  implemented in the hook — only the swap-shaping and re-anchor are.
+- Registry/launch path for the genuine architecture is not written.
+- CREATE2 mining for mask `0x2ACC` not done.
+- Gas for burn+mint per trade is an estimate (~250–400k on top of ~120k), never measured.
