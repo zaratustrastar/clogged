@@ -123,8 +123,19 @@ library ClogGenuineMath {
 
         int24 tU = TickMath.getTickAtSqrtPrice(uint160(sqrtPb));
         int24 tL = TickMath.getTickAtSqrtPrice(uint160(sqrtPa));
+        // tickUpper rounds DOWN so the launch price sits at or above it and the position is
+        // token-only with ZERO protocol ETH.
         tU = _floorTo(tU, tickSpacing);
-        tL = _floorTo(tL, tickSpacing);
+        // tickLower rounds UP AND is bumped one full spacing. getTickAtSqrtPrice truncates to
+        // the tick whose price is <= the input, so without the bump the position still holds
+        // slightly MORE token than canonical and each re-anchor runs the residual dry.
+        // At fixed L and fixed price the token a position holds is
+        // L*(sqrt(P) - sqrt(Pa)), so raising Pa REDUCES the token requirement without touching
+        // L or the price. Rounding down instead made each re-anchor demand more token than the
+        // launch residual could supply (74,866 needed vs 58,405 held on the first buy - caught
+        // by the differential suite). The range given up lies below the solvency cap, where the
+        // position holds no ETH to pay out anyway.
+        tL = _ceilTo(tL, tickSpacing) + tickSpacing;
         if (tL >= tU) revert DegenerateState();
 
         p.tickLower = tL;
@@ -193,6 +204,13 @@ library ClogGenuineMath {
             amountEth = SqrtPriceMath.getAmount0Delta(sqrtPX96, sqrtPbX96, liquidity, false);
             amountTok = SqrtPriceMath.getAmount1Delta(sqrtPaX96, sqrtPX96, liquidity, false);
         }
+    }
+
+    function _ceilTo(int24 tick, int24 spacing) private pure returns (int24) {
+        if (spacing <= 1) return tick;
+        int24 q = tick / spacing;
+        if (tick > 0 && tick % spacing != 0) q += 1;
+        return q * spacing;
     }
 
     function _floorTo(int24 tick, int24 spacing) private pure returns (int24) {

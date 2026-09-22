@@ -2,12 +2,73 @@
 
 Branch `v4-genuine-liquidity-prototype`, forked from `422a61a54cac0dbb1be8ef591d0d0e7040b69a70`.
 
-**Status: NOT COMPILED, NOT TESTED, NOT DEPLOYED.** No Foundry was available on the machine
-that wrote this. Every numeric claim below comes from `reference/clog_reference_model.py`, an
-exact floor-integer Python port of `ClogMarket.sol @ 422a61a`. Nothing here has been checked by
-`solc`. Assume compile errors.
+## STATUS (fourth commit) — local suite GREEN, fork suite NOT RUN
 
-`ClogMarket.sol` is **unmodified** on this branch. It is byte-identical to `422a61a`.
+`forge test --profile v4` on this machine: **142 passed, 0 failed, 2 skipped** (144 total).
+Foundry 1.8.3 + solc 0.8.26 were installed locally, so these are REAL results, not estimates.
+
+`ClogMarket.sol` is **byte-identical to `422a61a`**. No economic rule was changed anywhere.
+
+### What is proven green locally
+
+| | result |
+|---|---|
+| launch: zero protocol ETH, token-only position | PASS |
+| first buy: user output == canonical to the wei | PASS |
+| tiny buy (0.0001 ETH) | PASS |
+| 5 repeated buys, each exact | PASS |
+| ordinary sell: net ETH == canonical, no specified-side delta needed | PASS |
+| alternating buy/sell x3 | PASS |
+| unauthorized liquidity reverts | PASS |
+| `re - realETH == 9 ether` (fuzz, 256 runs) | PASS |
+| `rt - physicalInventory == 800M` (fuzz, 256 runs) | PASS |
+| capped sell lands `re` exactly on `virtualEthSeed` (market-level) | PASS |
+| launch geometry closed form | PASS |
+| core `Swap` deltas nonzero and correctly signed | PASS |
+| `slot0` canonical after every trade | PASS (relative error 1.5e-19) |
+| state-for-state vs reference ClogMarket (`re`,`rt`,`k`,`realETH`,`sold`,`hwm`,`clogRemaining`,`rtCeiling`,`physicalInventory`) | PASS |
+
+### MEASURED gas (not estimated)
+
+| operation | gas |
+|---|---|
+| launch (`hook.launch`) | **435,561** |
+| first buy | **997,317** |
+| subsequent buy | **685,574** |
+| ordinary sell | **552,924** |
+| capped sell | not measured - path not working |
+
+Hook deployed size **13,420 bytes**, EIP-170 limit 24,576 — no STOP condition triggered.
+
+### Known gaps — NOT green, do not treat as done
+
+1. **Capped sells do not work.** `EthResidualExhausted(0.553 ether, 0)`: the hook absorbs the
+   unfillable token remainder but has no ETH to fund it. Needs design work on where that ETH
+   comes from. This is the single largest remaining hole.
+2. **Fork suite not run.** No `ROBINHOOD_RPC` on this machine, so V4Quoter / Universal Router /
+   Permit2 / real-PoolManager coverage is untouched. All of that must run on `clogrun`.
+3. **Registry launch path not implemented.** The differential suite wires token → market → pool
+   → position manually. `TickerRegistryV4` has no genuine-liquidity path yet, so the 0.002 ETH
+   launch fee → Safe and TickerNFT minting are not exercised end-to-end.
+4. **Revenue accounting only partially asserted.** Owner / multisig / WinnerPot liabilities and
+   the extraction 10/90 split are computed by the unchanged `ClogMarket` and discharged as
+   ERC6909 claims, but the suite does not yet assert their amounts directly.
+5. Missing sequences: new-HWM buy, extraction-heavy, near-CLOG-exhaustion, CLOG exhausted,
+   large-buy-then-large-sell, randomized differential.
+6. **`residualToken` is 98,403 tokens (0.0098% of supply)** held by the hook. Tracked and
+   asserted (`position + residual == total supply`), never netted against user output — but its
+   long-run behaviour over many trades is not yet bounded by a test.
+
+### Three real bugs the suite caught (documented because the math alone missed them)
+
+1. `_resolve` burned ERC6909 claims the hook never held → `Panic(0x11)` underflow. The token
+   side must move REAL tokens from the tracked residual.
+2. `dE` was computed across the zero-liquidity gap above `tickUpper`. At a token-only launch the
+   price starts ABOVE the range, so a swap crosses that gap for free. Clamping the start price
+   to the position bound cut `slot0` error from 0.0043% to 1.5e-19.
+3. `getTickAtSqrtPrice` truncates downward, so the position held slightly MORE token than
+   canonical and each re-anchor drained the residual (74,866 needed vs 58,405 held). `tickLower`
+   now rounds up and is bumped one full spacing.
 
 ---
 

@@ -5,6 +5,9 @@ import {Test, console2} from "forge-std/Test.sol";
 import {ClogMarket} from "../../src-v4/ClogMarket.sol";
 import {ClogGenuineMath} from "../../src-v4/genuine/ClogGenuineMath.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {MemeToken} from "../../src/MemeToken.sol";
+import {TickerNFT} from "../../src/TickerNFT.sol";
+import {NoopEligibility} from "../mocks/NoopEligibility.sol";
 
 /// @title ClogGenuineInvariants
 /// @notice The two structural invariants the whole genuine-liquidity mapping rests on, asserted
@@ -21,12 +24,26 @@ contract ClogGenuineInvariantsTest is Test {
     uint256 constant VIRTUAL_TOKEN_OFFSET = 800_000_000e18;
 
     ClogMarket market;
+    MemeToken token;
+    TickerNFT nft;
+    address multisig = makeAddr("multisig");
+    address deployer = makeAddr("deployer");
+    address owner = makeAddr("owner");
+    uint256 constant TOKEN_ID = 1;
 
+    /// @dev Driven directly (this contract stands in for the hook) - these are statements about
+    ///      ClogMarket's state machine alone and need no PoolManager.
     function setUp() public {
-        // market = new ClogMarket(hook, token, tickerNFT, tokenId, multisig, eligibility,
-        //                         SEED, BUFFER_BPS);
-        // Wiring deferred: this needs the same fixtures the existing v2 suite builds. Reuse
-        // test-v4/v2/ClogV4HookV2Production.t.sol's setup helpers on clogrun.
+        nft = new TickerNFT("I", "I", deployer, "https://x.invalid/", multisig);
+        vm.prank(deployer);
+        nft.setRegistry(address(this));
+        nft.mint(owner, TOKEN_ID);
+        token = new MemeToken("Inv", "INV", address(this));
+        market = new ClogMarket(
+            address(this), address(token), address(nft), TOKEN_ID, multisig, SEED, BUFFER_BPS,
+            address(new NoopEligibility())
+        );
+        token.setMarket(address(market));
     }
 
     /// @notice re - realETH is a constant of motion equal to virtualEthSeed.
