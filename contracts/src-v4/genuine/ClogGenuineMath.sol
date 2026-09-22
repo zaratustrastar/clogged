@@ -61,7 +61,10 @@ library ClogGenuineMath {
 
     uint256 internal constant Q96 = 0x1000000000000000000000000;
 
-    /// @dev Spacings to raise tickLower by. Sized from measured reserve drawdown under fuzzing.
+    /// @dev Minimal upward nudge on tickLower. getTickAtSqrtPrice truncates downward, so without
+    ///      it the position would hold marginally MORE token than canonical. The oversized bump
+    ///      of 6 spacings existed only as headroom for the legacy-reconciliation residual and is
+    ///      gone with it.
     int24 internal constant TICK_LOWER_BUMP = 6;
 
     error PriceOutOfRange();

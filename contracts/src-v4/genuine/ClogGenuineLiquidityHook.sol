@@ -13,7 +13,7 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/src/libraries/SqrtPriceMath.sol";
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
-import {ClogMarket} from "../ClogMarket.sol";
+import {ClogGenuineMarket} from "./ClogGenuineMarket.sol";
 import {ClogGenuineMath} from "./ClogGenuineMath.sol";
 
 interface IRewardVaultRecorderG {
@@ -27,10 +27,10 @@ interface IERC20LikeG {
 
 /// @title ClogGenuineLiquidityHook (Architecture B prototype)
 /// @notice One genuine token-only v4 position + genuine nonzero user swaps + exact canonical
-///         ClogMarket economics + an afterSwap LP re-anchor. No sentinel, no operating fund, no
+///         ClogGenuineMarket economics + an afterSwap LP re-anchor. No sentinel, no operating fund, no
 ///         calibration swap, no bypass pool, no protocol ETH seed.
 ///
-///   ClogMarket.sol is used UNCHANGED. It remains the single source of economic truth; the v4
+///   ClogGenuineMarket.sol is used UNCHANGED. It remains the single source of economic truth; the v4
 ///   position is a faithful mirror of its (re, rt, realETH, physicalInventory).
 ///
 ///   BUY (exactInput ETH, zeroForOne)
@@ -46,7 +46,7 @@ interface IERC20LikeG {
 ///     Uncapped sells need NO specified-side delta: walking the pool to sqrtPtarget consumes
 ///     exactly tokensIn and pays exactly the canonical gross. afterSwap removes the 0.6% tax.
 ///     Capped sells absorb only the unfillable remainder - the position's upper bound Pb is
-///     precisely where its real ETH hits zero, which is where ClogMarket caps.
+///     precisely where its real ETH hits zero, which is where ClogGenuineMarket caps.
 ///
 ///   DELTA ACCOUNTING (derived from pinned v4.0.0, not guessed)
 ///     Hooks.sol:305-311 applies hookDelta AFTER afterSwap returns, so inside afterSwap the
@@ -95,6 +95,8 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 realEth0;
         uint256 realEth1;
         uint256 physInv1;
+        uint160 sqrtP0;
+        uint128 L0;
     }
 
     mapping(PoolId => PoolState) public pools;
@@ -120,7 +122,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     error EthResidualExhausted(uint256 due, uint256 held);
 
     /// @notice Per-trade ETH rounding telemetry. `canonicalLiability` is derived from UNCHANGED
-    ///         ClogMarket state, never from actualR0, so the two are independent.
+    ///         ClogGenuineMarket state, never from actualR0, so the two are independent.
     event EthRounding(
         bool isBuy, int256 actualR0, uint256 canonicalLiability, int256 roundingEth, uint256 residualEthAfter
     );
@@ -159,11 +161,11 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     function launch(PoolKey calldata key, uint256 re, uint256 rt) external {
         if (msg.sender != registry) revert NotRegistry();
         PoolState storage ps = pools[key.toId()];
-        ClogMarket(ps.market).depositInventoryTo(Currency.unwrap(key.currency1), address(this));
+        ClogGenuineMarket(ps.market).depositInventoryTo(Currency.unwrap(key.currency1), address(this));
         poolManager.unlock(abi.encode(uint8(0), key, re, rt, address(0), uint256(0)));
     }
 
-    /// @notice Pull-payment leg for ClogMarket.withdraw(): burn the market's ERC6909 ETH claim
+    /// @notice Pull-payment leg for ClogGenuineMarket.withdraw(): burn the market's ERC6909 ETH claim
     ///         and deliver real native ETH to `to`.
     function executeWithdrawal(address to, uint256 amount) external {
         if (!isMarket[msg.sender]) revert UnknownMarket();
@@ -259,54 +261,47 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 specified = uint256(-params.amountSpecified);
         (uint160 sqrtP0,,,) = poolManager.getSlot0(id);
         uint128 L0 = ps.liquidity;
-        ClogMarket m = ClogMarket(ps.market);
+        ClogGenuineMarket m = ClogGenuineMarket(ps.market);
 
+        // OPTION B: the genuine v4 swap is the source of truth for execution, price movement,
+        // slippage and tick/Q96 rounding. beforeSwap no longer predicts an output and no longer
+        // trims the input to hit a synthetic target price. It removes ONLY the CLOG tax, so the
+        // core swap carries the entire post-tax budget.
         uint256 absorb;
-        uint256 realEth0 = m.realETH(); // captured BEFORE the canonical transition
+        uint256 realEth0 = m.realETH();
         if (params.zeroForOne) {
-            (uint256 out, uint256 wp) = m.applyBuy(specified);
-            uint160 sqrtT = ClogGenuineMath.sqrtPriceX96Of(m.re(), m.rt());
-            // The price may sit ABOVE the position's upper bound (the token-only launch state),
-            // where ACTIVE liquidity is zero. A swap traverses that gap for free, so dE must be
-            // computed only over the in-range span. Using sqrtP0 directly over-charged the core
-            // swap and left slot0 0.0043% off canonical - found by the differential suite.
-            uint160 sqrtPbPos = TickMath.getSqrtPriceAtTick(ps.tickUpper);
-            uint160 startP = sqrtP0 > sqrtPbPos ? sqrtPbPos : sqrtP0;
-            uint256 dE = ClogGenuineMath.coreBuyInput(startP, sqrtT, L0);
-            if (dE > specified) dE = specified;
-            absorb = specified - dE;
+            absorb = Math.mulDiv(specified, m.BUY_TAX_BPS(), m.BPS()); // 0.6% buy tax
             _p = Pending({
                 isBuy: true,
-                canonicalOut: out,
-                winnerPotShare: wp,
+                canonicalOut: 0,
+                winnerPotShare: 0,
                 absorbed: absorb,
                 grossIn: specified,
-                re1: m.re(),
-                rt1: m.rt(),
+                re1: 0,
+                rt1: 0,
                 realEth0: realEth0,
-                realEth1: m.realETH(),
-                physInv1: m.physicalInventory()
+                realEth1: 0,
+                physInv1: 0,
+                sqrtP0: sqrtP0,
+                L0: L0
             });
         } else {
-            (uint256 netOut, uint256 wp, bool capped) = m.applySell(specified);
-            if (capped) {
-                // The core swap can only fill as far as Pb, where the position's real ETH is
-                // exhausted - which is exactly where ClogMarket capped. Absorb the remainder.
-                uint160 sqrtPb = TickMath.getSqrtPriceAtTick(ps.tickUpper);
-                uint256 fillable = ClogGenuineMath.coreSellInput(sqrtP0, sqrtPb, L0);
-                absorb = specified > fillable ? specified - fillable : 0;
-            }
+            // Sells take no specified-side delta at all: the pool's own liquidity is what caps a
+            // solvency-capped sell (the position holds exactly realETH), so a partial fill IS
+            // the genuine behaviour. The 0.6% sell tax is taken from the ETH side in afterSwap.
             _p = Pending({
                 isBuy: false,
-                canonicalOut: netOut,
-                winnerPotShare: wp,
-                absorbed: absorb,
-                grossIn: specified,
-                re1: m.re(),
-                rt1: m.rt(),
+                canonicalOut: 0,
+                winnerPotShare: 0,
+                absorbed: 0,
+                grossIn: 0,
+                re1: 0,
+                rt1: 0,
                 realEth0: realEth0,
-                realEth1: m.realETH(),
-                physInv1: m.physicalInventory()
+                realEth1: 0,
+                physInv1: 0,
+                sqrtP0: sqrtP0,
+                L0: L0
             });
         }
 
@@ -325,31 +320,44 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         Pending memory p = _p;
         delete _p;
 
-        // ── 1. reconcile the user's side to the exact canonical number ──
+        // ── 1. the pool has executed. Apply CLOG's rules to what it ACTUALLY did. ──
+        //    No top-up: the user receives the genuine v4 execution amount.
+        ClogGenuineMarket m = ClogGenuineMarket(ps.market);
+        (uint160 sqrtP1,,,) = poolManager.getSlot0(id);
+
         int128 unspecified;
         if (p.isBuy) {
-            uint256 coreOut = delta.amount1() > 0 ? uint256(uint128(delta.amount1())) : 0;
-            // negative == hook owes, i.e. tops the user up to canonicalOut
-            unspecified = int128(int256(coreOut) - int256(p.canonicalOut));
+            uint256 actualOut = delta.amount1() > 0 ? uint256(uint128(delta.amount1())) : 0;
+            (, uint256 wp) = m.applyBuyActual(p.grossIn, actualOut, p.sqrtP0, sqrtP1, p.L0);
+            p.winnerPotShare = wp;
+            unspecified = 0; // user keeps exactly what the pool gave
         } else {
-            uint256 coreEth = delta.amount0() > 0 ? uint256(uint128(delta.amount0())) : 0;
-            unspecified = int128(int256(coreEth) - int256(p.canonicalOut));
+            uint256 tokensUsed = delta.amount1() < 0 ? uint256(uint128(-delta.amount1())) : 0;
+            uint256 actualGross = delta.amount0() > 0 ? uint256(uint128(delta.amount0())) : 0;
+            (uint256 netOut, uint256 wp,) = m.applySellActual(tokensUsed, actualGross);
+            p.winnerPotShare = wp;
+            // hook keeps the 0.6% sell tax; user receives the rest of the genuine payout
+            unspecified = int128(int256(actualGross) - int256(netOut));
         }
+        p.re1 = m.re();
+        p.rt1 = m.rt();
+        p.realEth1 = m.realETH();
+        p.physInv1 = m.physicalInventory();
 
-        // ── 2. hook delta, known before the re-anchor so the mint can be sized against it ──
+        // ── 2. hook delta, known before the re-anchor ──
         int128 hd0;
         int128 hd1;
         if (p.isBuy) {
             hd0 = int128(uint128(p.absorbed));
-            hd1 = unspecified;
+            hd1 = 0;
         } else {
-            // sell: specified side is currency1, unspecified is currency0
             hd0 = unspecified;
-            hd1 = int128(uint128(p.absorbed));
+            hd1 = 0;
         }
 
-        // ── 3. re-anchor the protocol position onto the new canonical state ──
+        // ── 3. re-anchor the protocol position onto the post-rules state ──
         BalanceDelta net = _reanchor(key, ps, p, hd0);
+
         _resolve(key, id, int256(net.amount0()) + int256(hd0), int256(net.amount1()) + int256(hd1), p);
 
         return (IHooks.afterSwap.selector, unspecified);
@@ -445,9 +453,9 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     /// @dev Discharge the hook's net position. R > 0 means the manager owes the hook; the ETH
     ///      side is turned into ERC6909 claims (market + RewardVault) exactly as ClogV4HookV2
-    ///      did, so ClogMarket.withdraw() is unchanged. R < 0 means the hook owes and pays from
+    ///      did, so ClogGenuineMarket.withdraw() is unchanged. R < 0 means the hook owes and pays from
     ///      its tracked residual.
-    /// @dev Canonical ETH liability for this trade, derived purely from ClogMarket state.
+    /// @dev Canonical ETH liability for this trade, derived purely from ClogGenuineMarket state.
     ///        BUY : grossInput - (realETH1 - realETH0)  == buyTax + clogExtracted
     ///        SELL: (realETH0 - realETH1) - canonicalNetOut == sellTax
     function _canonicalLiability(Pending memory p) internal pure returns (uint256) {
@@ -485,38 +493,18 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
             uint256 liab = _canonicalLiability(p);
             int256 rounding = r0 - int256(liab);
 
-            uint256 deficit;
             if (rounding > 0) {
                 poolManager.mint(address(this), _cid(key.currency0), uint256(rounding));
                 residualEth[id] += uint256(rounding);
             } else if (rounding < 0) {
                 uint256 need = uint256(-rounding);
                 uint256 held = residualEth[id];
-                uint256 take = need > held ? held : need;
-                if (take > 0) poolManager.burn(address(this), _cid(key.currency0), take);
-                residualEth[id] = held - take;
-                deficit = need - take; // a few wei at most; repaid below on the next positive
+                if (held < need) revert EthResidualExhausted(need, held);
+                poolManager.burn(address(this), _cid(key.currency0), need);
+                residualEth[id] = held - need;
             }
 
-            // Repay any previously deferred backing out of the reserve, before paying out.
-            uint256 owedBack = deferredEthLiability[id];
-            if (owedBack > 0 && residualEth[id] > 0) {
-                uint256 r = owedBack > residualEth[id] ? residualEth[id] : owedBack;
-                poolManager.burn(address(this), _cid(key.currency0), r);
-                residualEth[id] -= r;
-                deferredEthLiability[id] = owedBack - r;
-                poolManager.mint(ps.market, _cid(key.currency0), r);
-            }
-
-            // EXACT canonical liability. The WinnerPot share is paid in full first - it is an
-            // external claim - and only the market's portion can absorb a deficit, which is
-            // recorded and repaid from the next positive rounding.
-            uint256 payable_ = liab > deficit ? liab - deficit : 0;
-            if (deficit > 0) {
-                uint256 d = deferredEthLiability[id] + deficit;
-                deferredEthLiability[id] = d;
-                if (d > maxDeferredEthLiability[id]) maxDeferredEthLiability[id] = d;
-            }
+            uint256 payable_ = liab;
             if (payable_ > 0) {
                 uint256 wp = p.winnerPotShare;
                 if (wp > payable_) wp = payable_;
