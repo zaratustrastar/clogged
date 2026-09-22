@@ -29,6 +29,11 @@ interface ITickerNFTG {
 contract ClogGenuineRegistry {
     uint256 public constant LAUNCH_PRICE = 0.002 ether;
 
+    /// @notice Set once, at construction, to the deployer. The ONLY account that may call
+    ///         setV4Infrastructure, and only while the infrastructure is still unset. There is
+    ///         deliberately no transfer, no upgrade path and no way to reconfigure afterwards.
+    address public immutable configurator;
+
     address public immutable safe;
     address public immutable tickerNFT;
     address public immutable multisig;
@@ -46,6 +51,9 @@ contract ClogGenuineRegistry {
 
     event Launched(uint256 indexed tokenId, address token, address market, address launcher, uint256 fee);
 
+    error NotConfigurator();
+    error AlreadyConfigured();
+    error ZeroAddress();
     error WrongFee();
     error FeeTransferFailed();
     error NotConfigured();
@@ -58,6 +66,7 @@ contract ClogGenuineRegistry {
         uint256 virtualEthSeed_,
         uint256 bufferMultiplierBps_
     ) {
+        configurator = msg.sender;
         safe = safe_;
         tickerNFT = tickerNFT_;
         multisig = multisig_;
@@ -66,7 +75,17 @@ contract ClogGenuineRegistry {
         bufferMultiplierBps = bufferMultiplierBps_;
     }
 
+    /// @notice One-shot infrastructure wiring, callable only by the configurator.
+    /// @dev Previously unguarded: anyone could re-point poolManager/hook/rewardVault, and since
+    ///      hook.setRewardVault is onlyRegistry that allowed redirecting the WinnerPot. Now it
+    ///      is configurator-only AND single-use. hook.setRewardVault stays onlyRegistry.
     function setV4Infrastructure(address pm, address hook_, address vault) external {
+        if (msg.sender != configurator) revert NotConfigurator();
+        if (
+            address(poolManager) != address(0) || address(hook) != address(0)
+                || rewardVault != address(0)
+        ) revert AlreadyConfigured();
+        if (pm == address(0) || hook_ == address(0) || vault == address(0)) revert ZeroAddress();
         poolManager = IPoolManager(pm);
         hook = ClogGenuineLiquidityHook(payable(hook_));
         rewardVault = vault;

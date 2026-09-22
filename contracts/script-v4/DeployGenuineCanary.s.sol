@@ -92,6 +92,7 @@ contract DeployGenuineCanary is Script {
         vm.stopBroadcast();
 
         _verify(eligibility, nft, geometry, registry, hook, vault);
+        _verifyAccessControl(registry, hook, vault, deployer);
 
         console2.log("== deployed addresses ==");
         console2.log("  EligibilityRegistry   ", address(eligibility));
@@ -103,6 +104,33 @@ contract DeployGenuineCanary is Script {
         console2.log("");
         console2.log("NO ticker launched, NO trades performed. Launch fee stays", LAUNCH_FEE);
         console2.log("tickSpacing for launches:", int256(TICK_SPACING));
+    }
+
+    /// @dev Access control on the one-shot infrastructure wiring. Runs OUTSIDE the broadcast, so
+    ///      the deliberate revert probe is a local simulation and is never sent.
+    function _verifyAccessControl(
+        ClogGenuineRegistry registry,
+        ClogGenuineLiquidityHook hook,
+        RewardVault vault,
+        address deployer
+    ) internal {
+        require(registry.configurator() == deployer, "configurator != deployer");
+        console2.log("  configurator == deployer  OK");
+
+        require(address(registry.poolManager()) != address(0), "poolManager unconfigured");
+        require(address(registry.hook()) != address(0), "hook unconfigured");
+        require(registry.rewardVault() != address(0), "rewardVault unconfigured");
+        console2.log("  infrastructure configured OK");
+
+        // a second call must revert AlreadyConfigured - proves the wiring is one-shot
+        (bool ok,) = address(registry).call(
+            abi.encodeWithSelector(
+                ClogGenuineRegistry.setV4Infrastructure.selector,
+                POOL_MANAGER, address(hook), address(vault)
+            )
+        );
+        require(!ok, "second setV4Infrastructure did NOT revert");
+        console2.log("  re-configuration reverts  OK");
     }
 
     function _mine(bytes32 initHash) internal pure returns (address addr, bytes32 salt) {

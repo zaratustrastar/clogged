@@ -57,18 +57,26 @@ CREATE2 salt is mined against the Registry address, which depends on the deploye
 script re-mines at run time and asserts `CREATE2 address mismatch` if prediction and deployment
 ever disagree, so this is safe — but do not treat dry-run addresses as final.
 
-## BLOCKER TO RESOLVE BEFORE BROADCAST
+## Access control on the infrastructure wiring
 
-`ClogGenuineRegistry.setV4Infrastructure(address,address,address)` has **no access control**:
+`setV4Infrastructure` was originally **unguarded** — anyone could re-point `poolManager`, `hook`
+and `rewardVault`, and since `hook.setRewardVault` is `onlyRegistry` that allowed redirecting the
+WinnerPot to an attacker-controlled vault.
+
+It is now `configurator`-only and **one-shot**:
 
 ```solidity
-function setV4Infrastructure(address pm, address hook_, address vault) external {
+address public immutable configurator;   // set to msg.sender in the constructor
+
+if (msg.sender != configurator) revert NotConfigurator();
+if (address(poolManager) != address(0) || address(hook) != address(0) || rewardVault != address(0))
+    revert AlreadyConfigured();
+if (pm == address(0) || hook_ == address(0) || vault == address(0)) revert ZeroAddress();
 ```
 
-Anyone can call it at any time and re-point `poolManager`, `hook` and `rewardVault`. Because
-`hook.setRewardVault` is `onlyRegistry`, an attacker can call
-`registry.setV4Infrastructure(x, <realHook>, <attackerVault>)` and redirect the WinnerPot.
+No transfer, no ownership, no proxy, no reconfiguration — not even by the configurator.
+`hook.setRewardVault` remains `onlyRegistry` and was not touched.
 
-The source is frozen, so this is reported rather than fixed. It must be decided on before any
-broadcast — even for a disposable canary, since the canary is the thing Sigma/Based will be
-pointed at.
+Covered by `test-v4/genuine/RegistryAccessControl.t.sol` (9 tests), including the original
+exploit path. The deploy script now also asserts `configurator == deployer`, that the
+infrastructure is configured, and that a second `setV4Infrastructure` call reverts.
