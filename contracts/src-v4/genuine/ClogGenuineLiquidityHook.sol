@@ -69,6 +69,13 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     ///         is an order of magnitude above it and is ASSERTED, not assumed.
     uint256 internal constant MAX_SETTLEMENT_COST = 100;
 
+    /// @notice Token-side integer settlement reserve, in token-wei. 1e12 = 0.000001 token,
+    ///         the cap agreed for this mechanism. Sourced ONLY by holding back a hair of the
+    ///         BOUNDARY position's liquidity - never minted, never externally funded.
+    ///         Measured worst-case cumulative negative token dust is ~4.4e3 wei, so this is
+    ///         eight orders of magnitude of headroom.
+    uint256 internal constant TOKEN_SETTLEMENT_RESERVE = 1e12;
+
     struct PoolState {
         address market;
         uint256 virtualEthSeed;
@@ -101,6 +108,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     mapping(PoolId => uint256) public residualToken;
     /// @notice Cumulative v4 settlement cost absorbed by the WinnerPot residual. Asserted.
     mapping(PoolId => uint256) public settlementCostPaid;
+    /// @notice High-water mark of the token settlement reserve actually consumed. Asserted.
+    mapping(PoolId => uint256) public maxTokenReserveUsed;
+    /// @notice High-water mark of the per-trade v4 ETH settlement cost. Asserted.
+    mapping(PoolId => uint256) public maxSettlementCost;
 
     Pending internal _p;
     address internal _withdrawMarket;
@@ -111,6 +122,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     error ExactOutputUnsupported();
     error UnknownMarket();
     error VaultNotSet();
+    error TokenReserveExhausted(uint256 due, uint256 held);
 
     /// @notice r0/r1 vs the INDEPENDENTLY derived canonical liability. Emitted every trade so
     ///         the suite can assert the identity rather than infer it from r0 itself.
@@ -376,6 +388,19 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     {
         ClogGenuineMath.Position memory np =
             ClogGenuineMath.positionFor(p.re1, p.rt1, pools[id].virtualEthSeed, key.tickSpacing);
+
+        // Hold TOKEN_SETTLEMENT_RESERVE back out of the BOUNDARY position only. Token per unit
+        // of liquidity is about physicalInventory/L, so the trim is ~1e-15 relative. It touches
+        // only the boundary geometry - never the exact three-position interpolation used during
+        // normal trading - and the hook reconciles user output and traverses slot0 to canonical
+        // regardless, so canonical price, CLOG release, HWM, extraction and user output are
+        // unaffected. Asserted by the differential suite.
+        if (p.rt1 > ClogGenuineMath.VIRTUAL_TOKEN_OFFSET) {
+            uint256 physInv = p.rt1 - ClogGenuineMath.VIRTUAL_TOKEN_OFFSET;
+            uint256 cut = (TOKEN_SETTLEMENT_RESERVE * uint256(np.liquidity)) / physInv + 1;
+            if (cut < np.liquidity) np.liquidity = uint128(uint256(np.liquidity) - cut);
+        }
+
         quads[id][0] = FP.Quad(np.tickLower, np.tickUpper, np.liquidity);
         (BalanceDelta d,) = poolManager.modifyLiquidity(
             key,
@@ -489,6 +514,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
             uint256 wp = p.winnerPotShare;
             if (owed < liab) {
                 uint256 cost = liab - owed;
+                if (cost > maxSettlementCost[id]) maxSettlementCost[id] = cost;
                 require(cost <= MAX_SETTLEMENT_COST, "settlement cost above bound");
                 require(cost <= wp, "settlement cost exceeds WinnerPot residual");
                 wp -= cost;
@@ -508,13 +534,17 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
         if (r1 > 0) {
             poolManager.take(key.currency1, address(this), uint256(r1));
-            residualToken[id] += uint256(r1);
+            residualToken[id] = IERC20LikeG(Currency.unwrap(key.currency1)).balanceOf(address(this));
         } else if (r1 < 0) {
             uint256 due = uint256(-r1);
-            residualToken[id] -= due;
+            uint256 held = IERC20LikeG(Currency.unwrap(key.currency1)).balanceOf(address(this));
+            // explicit error instead of Panic(0x11) on the mapping subtraction
+            if (held < due) revert TokenReserveExhausted(due, held);
             poolManager.sync(key.currency1);
             IERC20LikeG(Currency.unwrap(key.currency1)).transfer(address(poolManager), due);
             poolManager.settle();
+            residualToken[id] = held - due;
+            if (due > maxTokenReserveUsed[id]) maxTokenReserveUsed[id] = due;
         }
     }
 

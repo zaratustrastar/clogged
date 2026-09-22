@@ -78,6 +78,8 @@ contract DustMeasurementTest is Test {
 
     uint256 public activePosSum;
     uint256 public reanchors;
+    uint256 public worstCost;
+    uint256 public worstReserve;
 
     function _setUpMode(ClogFourPositionMath.HhMode m) internal {
         vm.warp(1_700_000_000);
@@ -220,7 +222,11 @@ contract DustMeasurementTest is Test {
     /// @dev instrumentation only: lets a negative dust step proceed so the series is observable
     /// @dev No pre-funding any more. The boundary clamp that previously forced it is handled by
     ///      SINGLE_BOUNDARY, so any revert here is a genuine accounting failure.
-    function _prefund() internal {}
+    /// @dev TEST-ONLY buffer so a negative token dust step cannot underflow and truncate the
+    ///      measurement. Instrumentation, never a fix.
+    function _prefund() internal {
+        deal(address(token), address(hook), token.balanceOf(address(hook)) + 1_000e18);
+    }
 
     function _scenario() internal {
         _buy(1 ether);
@@ -294,6 +300,7 @@ contract DustMeasurementTest is Test {
     /// @notice Accounting failures are UNCAUGHT: any revert fails the run.
     function testFuzz_A5_randomized(uint96[12] calldata a, uint16 pat) public {
         _prefund();
+        _prefund();
         _buy(0.5 ether); // leave SINGLE_BOUNDARY so the body measures FOUR_EXACT
         for (uint256 i = 0; i < a.length; i++) {
             if ((pat >> (i % 16)) & 1 == 1 || token.balanceOf(trader) < 1e18) {
@@ -306,5 +313,9 @@ contract DustMeasurementTest is Test {
         }
         assertLe(minCumEth, maxCumEth);
         assertLe(minCumTok, maxCumTok);
+        if (hook.maxSettlementCost(pid) > worstCost) worstCost = hook.maxSettlementCost(pid);
+        if (hook.maxTokenReserveUsed(pid) > worstReserve) worstReserve = hook.maxTokenReserveUsed(pid);
+        emit log_named_uint("worst ETH settlement cost (wei)", worstCost);
+        emit log_named_uint("worst token reserve used (wei) ", worstReserve);
     }
 }
