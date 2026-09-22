@@ -180,16 +180,47 @@ forge test --profile v4 --fork-url $ROBINHOOD_RPC \
   --match-path test-v4/genuine/ModifyLiquidityInAfterSwapProbe.t.sol -vvvv
 ```
 
-`ProbeHook`'s body is intentionally unimplemented — writing it is the first task. It must answer,
-on the pinned Robinhood v4:
+The probe is **implemented** (second commit). It contains no CLOG economics, so a failure is
+unambiguously a v4-platform fact.
 
-1. Does `modifyLiquidity` inside `afterSwap` revert?
-2. Does the burn+mint move `slot0`?
-3. Does v4 `noSelfCall` skip `beforeAddLiquidity` for the hook's own call?
-4. Does the unlock settle, or does it fail `CurrencyNotSettled`?
+**Read from pinned v4-core v4.0.0 (`e50237c43811bd9b526eff40f26772152a42daba`), not assumed:**
 
-**If (1) or (4) fails, Architecture B as written is dead** and must fall back to a deferred /
-keeper re-anchor. Do not build further until this is answered.
+| fact | source |
+|---|---|
+| `modifyLiquidity` is `onlyWhenUnlocked noDelegateCall` — **no reentrancy guard**, and the lock is still open during `afterSwap` | `PoolManager.sol:148` |
+| `_swap()` completes **before** `afterSwap` is called, so `slot0` is already final; the re-anchor must not move it | `PoolManager.sol:185-224` |
+| a hook-initiated `modifyLiquidity` accrues its delta to the **hook**, which must settle/take it itself | `PoolManager.sol:180` |
+| `modifier noSelfCall(IHooks self) { if (msg.sender != address(self)) { _; } }` | `Hooks.sol:170-174` |
+| `beforeModifyLiquidity` carries `noSelfCall`, so the hook's own call does **not** re-enter its add/remove gates | `Hooks.sol:194-199` |
+| `unlock()` reverts `CurrencyNotSettled` if `NonzeroDeltaCount != 0` | `PoolManager.sol:112` |
+
+On paper this says the re-anchor is admissible. The probe exists to confirm it on-chain.
+
+**Design notes.** No `try/catch` anywhere near the `modifyLiquidity` calls — a platform rejection
+reverts the whole swap with its real reason. `burnSucceeded` / `mintSucceeded` are set only
+*after* the calls return, so they can never report success for a call that did not run. The test
+swaps **twice**: pass 1 has no hook-owned position and only mints; pass 2 exercises burn +
+re-mint. `burnAttempted` distinguishes the two.
+
+**Corrected launch criteria (per your instruction).** `getLiquidity() > 0` is NOT required at a
+token-only launch — the live Klik pool has `initial tick 184,216 > tickUpper 184,200`, so
+pool-wide active liquidity is legitimately zero until the first buy crosses the upper tick. The
+probe therefore asserts:
+
+- a real initialized protocol position exists with **nonzero position liquidity**
+  (`getPositionLiquidity`, not `getLiquidity`);
+- it holds token and **zero ETH** (`address(POOL_MANAGER).balance == 0`);
+- the price starts **above** the range;
+- a genuine swap traverses into the range;
+- the core `Swap` deltas are nonzero and correctly signed (`amount0 < 0`, `amount1 > 0`);
+- **after** the first buy, `getLiquidity() > 0` and `tick < tickUpper`.
+
+V4Quoter / Universal Router / Permit2 coverage is deferred to Step 3 — this probe deliberately
+drives `PoolManager` directly so that a failure cannot be blamed on router plumbing.
+
+**If the probe shows `modifyLiquidity` from `afterSwap` is impossible, or its deltas cannot be
+settled in the same unlock: STOP.** Architecture B as written is invalid and a deferred /
+keeper re-anchor is required. No workaround is implemented in this branch by instruction.
 
 ### Step 1 — invariants (no fork needed)
 
@@ -231,9 +262,12 @@ still not been run.**
 
 ## 8. Known gaps in this commit
 
-- Nothing compiles-checked. `ProbeHook` is a stub by design; `ClogGenuineInvariants.setUp()` is
-  unwired; `ClogGenuineLiquidityHook` has not been reviewed against pinned `v4-core` signatures
-  (`SwapParams` / `ModifyLiquidityParams` namespacing differs across v4 versions).
+- Nothing compiles-checked (no Foundry on the authoring machine). The probe was written against
+  the pinned v4.0.0 APIs read directly from `lib/v4-core` — `IPoolManager.ModifyLiquidityParams`,
+  `IPoolManager.SwapParams`, `StateLibrary.getPositionLiquidity/getLiquidity/getSlot0`,
+  `Position.calculatePositionKey`, `settle()/take()/sync()` — but has never been through `solc`.
+- `ClogGenuineInvariants.setUp()` is still unwired; `ClogGenuineLiquidityHook` is still unreviewed
+  against pinned signatures. Neither was in scope for this commit.
 - Tax/extraction settlement (`_credit`, `take`/`settle`, ERC-6909 WinnerPot claim) is **not**
   implemented in the hook — only the swap-shaping and re-anchor are.
 - Registry/launch path for the genuine architecture is not written.
