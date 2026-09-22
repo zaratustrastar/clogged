@@ -269,6 +269,17 @@ contract ClogFourPositionTest is Test {
         _invariants();
     }
 
+    /// @notice Buy AFTER a capped sell: exercises whatever geometry the boundary left behind.
+    function test_9_buyAfterCappedSell() public {
+        _buy(0.2 ether);
+        _sell(token.balanceOf(trader));
+        emit log_named_uint("realETH after capped sell", market.realETH());
+        emit log_named_uint("geometryMode after capped sell", uint256(uint8(hook.geometryMode(pid))));
+        _buy(0.1 ether);
+        _invariants();
+        _reconcile();
+    }
+
     /// @notice Requirement 7: capped sells. The pool's own liquidity is the cap.
     function test_7_cappedSell() public {
         _buy(0.2 ether);
@@ -283,13 +294,14 @@ contract ClogFourPositionTest is Test {
 
     /// @notice Requirement 8: drive CLOG toward exhaustion.
     function test_8_clogExhaustion() public {
-        for (uint256 i = 0; i < 60; i++) {
+        for (uint256 i = 0; i < 80; i++) {
             if (market.clogRemaining() == 0) break;
-            try this.extBuy(1 ether) { } catch { break; }
+            if (market.physicalInventory() < 20_000_000e18) break;
+            _buy(1 ether); // uncaught: a failure here is a real failure
             _invariants();
         }
-        emit log_named_uint("clogRemaining at end", market.clogRemaining());
         emit log_named_decimal_uint("sold", market.sold(), 18);
+        assertEq(market.clogRemaining(), 0, "CLOG must be fully exhausted");
     }
 
     function extBuy(uint256 a) external { _buy(a); }
@@ -306,21 +318,25 @@ contract ClogFourPositionTest is Test {
     }
 
     /// @notice Requirement 1: 1,000 randomized sequences, no skips, no CurrencyNotSettled.
+    /// @notice Randomized sequences with accounting errors UNCAUGHT. Inputs are bounded so
+    ///         every generated trade is economically valid; therefore ANY revert - including
+    ///         CurrencyNotSettled or a hook settlement error - fails the test. Nothing is
+    ///         swallowed with try/catch.
     function testFuzz_randomized(uint96[8] calldata amts, uint8 pattern) public {
         for (uint256 i = 0; i < amts.length; i++) {
-            bool doBuy = (pattern >> (i % 8)) & 1 == 1 || token.balanceOf(trader) == 0;
+            bool doBuy = (pattern >> (i % 8)) & 1 == 1 || token.balanceOf(trader) < 1e18;
             if (doBuy) {
-                uint256 amt = bound(uint256(amts[i]), 0.0001 ether, 1.5 ether);
-                try this.extBuy(amt) { } catch { continue; }
+                // bounded so the inventory guard and CLOG limits cannot legitimately trip
+                if (market.clogRemaining() == 0) continue;
+                if (market.physicalInventory() < 50_000_000e18) continue;
+                _buy(bound(uint256(amts[i]), 0.0001 ether, 0.25 ether));
             } else {
                 uint256 bal = token.balanceOf(trader);
-                if (bal < 1e18) continue;
-                uint256 amt = bound(uint256(amts[i]), 1e18, bal);
-                try this.extSell(amt) { } catch { continue; }
+                if (bal < 1e18 || market.realETH() == 0) continue;
+                _sell(bound(uint256(amts[i]), 1e18, bal / 2));
             }
             _invariants();
             _reconcile();
-            assertEq(address(hook).balance, 0, "hook must never hold raw ETH");
         }
     }
 

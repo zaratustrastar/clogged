@@ -76,6 +76,11 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 absorbed;
         uint256 re1;
         uint256 rt1;
+        /// @dev Derived from ClogMarket.realETH pre/post, NEVER from the observed r0, so
+        ///      settlement can assert the identity independently.
+        ///        BUY : grossIn - (realETH1 - realETH0)  == buyTax + clogExtracted
+        ///        SELL: (realETH0 - realETH1) - netOut   == sellTax
+        uint256 canonicalLiability;
     }
 
     mapping(PoolId => PoolState) public pools;
@@ -97,6 +102,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     error UnknownMarket();
     error VaultNotSet();
 
+    /// @notice r0/r1 vs the INDEPENDENTLY derived canonical liability. Emitted every trade so
+    ///         the suite can assert the identity rather than infer it from r0 itself.
+    event SettleCheck(bool isBuy, int256 r0, int256 r1, uint256 canonicalLiability);
+
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
         _;
@@ -117,6 +126,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     {
         FP.Quad memory q = quads[id][i];
         return (q.tickLower, q.tickUpper, q.liquidity);
+    }
+
+    function geometryMode(PoolId id) external view returns (GeometryMode) {
+        return pools[id].mode;
     }
 
     function setRewardVault(address v) external {
@@ -226,18 +239,47 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     function _prepBuy(PoolId id, uint256 gross) internal returns (uint256 absorb) {
         ClogMarket m = ClogMarket(pools[id].market);
+        uint256 e0 = m.realETH();
         (uint256 out, uint256 wp) = m.applyBuy(gross);
+        uint256 gained = m.realETH() - e0;
         uint256 dE = _coreBuyInput(id, m.re(), m.rt());
         if (dE > gross) dE = gross;
         absorb = gross - dE;
-        _p = Pending(true, out, wp, absorb, m.re(), m.rt());
+        _p = Pending(true, out, wp, absorb, m.re(), m.rt(), gross > gained ? gross - gained : 0);
     }
 
-    function _prepSell(PoolId id, uint256 tokensIn) internal returns (uint256) {
+    function _prepSell(PoolId id, uint256 tokensIn) internal returns (uint256 absorb) {
         ClogMarket m = ClogMarket(pools[id].market);
-        (uint256 netOut, uint256 wp,) = m.applySell(tokensIn);
-        _p = Pending(false, netOut, wp, 0, m.re(), m.rt());
-        return 0;
+        uint256 e0 = m.realETH();
+        (uint256 netOut, uint256 wp, bool capped) = m.applySell(tokensIn);
+        uint256 gross = e0 - m.realETH();
+        absorb = capped ? _cappedRemainder(id, tokensIn) : 0;
+        _p = Pending(false, netOut, wp, absorb, m.re(), m.rt(), gross > netOut ? gross - netOut : 0);
+    }
+
+    /// @dev Tokens the user's sell input that the LP genuinely CANNOT absorb.
+    ///      A capped sell drives the pool's real ETH to zero, i.e. the price to the highest
+    ///      live upper bound. The fillable amount is the AGGREGATE currency1 the four ranges
+    ///      take while the price walks from here to that bound - summed per position over the
+    ///      overlap of [P, top] with [Pa_i, Pb_i]. The single-position formula does not apply:
+    ///      the four ranges start and end at different ticks, so they enter the fill at
+    ///      different points.
+    function _cappedRemainder(PoolId id, uint256 tokensIn) internal view returns (uint256) {
+        (uint160 p0,,,) = poolManager.getSlot0(id);
+        uint160 top = _activeTop(id);
+        if (top <= p0) return 0;
+        uint256 fillable;
+        for (uint256 i = 0; i < 4; i++) {
+            FP.Quad memory q = quads[id][i];
+            if (q.liquidity == 0) continue;
+            uint160 a = TickMath.getSqrtPriceAtTick(q.tickLower);
+            uint160 b = TickMath.getSqrtPriceAtTick(q.tickUpper);
+            uint160 lo = p0 > a ? p0 : a;
+            uint160 hi = top < b ? top : b;
+            if (lo >= hi) continue;
+            fillable += SqrtPriceMath.getAmount1Delta(lo, hi, q.liquidity, false);
+        }
+        return tokensIn > fillable ? tokensIn - fillable : 0;
     }
 
     function _coreBuyInput(PoolId id, uint256 re1, uint256 rt1) internal view returns (uint256) {
@@ -274,10 +316,14 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         delete _p;
 
         int128 unspec = p.isBuy ? _afterBuy(p, delta) : _afterSell(p, delta);
+        // Symmetric hook delta. For a BUY the specified side is currency0 and the unspecified
+        // side is currency1; for a SELL they swap. Omitting the currency1 leg on buys was what
+        // left the unlock unbalanced.
         int128 hd0 = p.isBuy ? int128(uint128(p.absorbed)) : unspec;
+        int128 hd1 = p.isBuy ? unspec : int128(uint128(p.absorbed));
 
         BalanceDelta net = _reanchor(key, id, p);
-        _settle(key, id, int256(net.amount0()) + int256(hd0), int256(net.amount1()), p);
+        _settle(key, id, int256(net.amount0()) + int256(hd0), int256(net.amount1()) + int256(hd1), p);
         return (IHooks.afterSwap.selector, unspec);
     }
 
@@ -364,6 +410,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     function _settle(PoolKey calldata key, PoolId id, int256 r0, int256 r1, Pending memory p) internal {
         address market = pools[id].market;
+        emit SettleCheck(p.isBuy, r0, r1, p.canonicalLiability);
         if (r0 > 0) {
             uint256 owed = uint256(r0);
             uint256 wp = p.winnerPotShare > owed ? owed : p.winnerPotShare;
