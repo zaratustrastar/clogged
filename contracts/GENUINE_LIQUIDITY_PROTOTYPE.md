@@ -180,8 +180,36 @@ forge test --profile v4 --fork-url $ROBINHOOD_RPC \
   --match-path test-v4/genuine/ModifyLiquidityInAfterSwapProbe.t.sol -vvvv
 ```
 
-The probe is **implemented** (second commit). It contains no CLOG economics, so a failure is
-unambiguously a v4-platform fact.
+**RESULT: the load-bearing question is answered POSITIVELY on the real Robinhood fork.**
+`modifyLiquidity` from inside `afterSwap`, during the same unlock session, is **admissible and
+settleable**. Confirmed on-chain, first run:
+
+| result | evidence |
+|---|---|
+| Solidity compiles | build succeeded |
+| genuine core swap | `amount0 < 0`, `amount1 > 0`, both nonzero |
+| `afterSwap` ran | `afterSwapRan == true` |
+| first re-anchor mint | `mintSucceeded == true` |
+| second re-anchor burn + mint | `burnAttempted`, `burnSucceeded`, `mintSucceeded` all true |
+| **no `CurrencyNotSettled`** | both outer `unlock()` calls returned |
+| **re-anchor does not move price** | slot0 before == after == `981699536437775202883382546593510` |
+| **`noSelfCall` holds** | no gate invocation during the hook's own burn/re-mint |
+| replacement position | exists with the intended range and liquidity |
+
+Two assertions failed on the first run and were **false failures in the test, not the platform**;
+both are fixed in the third commit:
+
+1. `assertEq(address(POOL_MANAGER).balance, 0)` — invalid on a fork of the live manager, whose
+   global native balance carries ETH from unrelated pools. Replaced with position-scoped
+   evidence: the `BalanceDelta` returned by our own `modifyLiquidity`
+   (`initialLiquidityAmount0 == 0`, `initialLiquidityAmount1 < 0`), plus this contract's ETH
+   balance being unchanged across the add.
+2. `assertEq(hook.addLiquidityGateCalls(), 0)` — `setUp()` legitimately adds the seed position
+   from the TEST contract, a genuine outsider, which correctly fires `beforeAddLiquidity` once.
+   Replaced with a baseline captured after `setUp()`, asserted unchanged across both re-anchors.
+   Nothing is reset or hidden; real unexpected callbacks still fail.
+
+The probe contains no CLOG economics, so these results are v4-platform facts.
 
 **Read from pinned v4-core v4.0.0 (`e50237c43811bd9b526eff40f26772152a42daba`), not assumed:**
 

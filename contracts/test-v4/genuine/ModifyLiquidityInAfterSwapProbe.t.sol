@@ -70,6 +70,10 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
     int24 constant INIT_TICK = 191_200; // strictly above TICK_UPPER
     uint128 constant POSITION_LIQUIDITY = 1e23;
 
+    /// @dev slot0 sqrtPriceX96 recorded both BEFORE and AFTER the second afterSwap re-anchor on
+    ///      the real Robinhood fork - identical, proving the burn+re-mint does not move price.
+    uint160 constant OBSERVED_SQRT_PRICE_AFTER_SECOND_REANCHOR = 981699536437775202883382546593510;
+
     ProbeToken token;
     ProbeHook hook;
     PoolKey key;
@@ -78,6 +82,28 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
     // recorded by the unlock callback
     int128 public observedSwapAmount0;
     int128 public observedSwapAmount1;
+
+    /// @dev Position-specific proof that the launch needed no ETH. The PoolManager's GLOBAL
+    ///      native balance is useless for this on a fork of the live Robinhood manager - it
+    ///      carries ETH from unrelated pools. The BalanceDelta returned by our own
+    ///      modifyLiquidity is the only evidence that is actually about our position.
+    int128 public initialLiquidityAmount0;
+    int128 public initialLiquidityAmount1;
+    uint256 public ethBeforeAddLiquidity;
+    uint256 public ethAfterAddLiquidity;
+
+    /// @dev Gate counters as of the END of setUp(). setUp() legitimately adds the seed position
+    ///      from THIS contract (not the hook), which correctly invokes beforeAddLiquidity once.
+    ///      The self-call question is whether the counters move during the hook's OWN
+    ///      burn/re-mint, so the baseline is captured here rather than assumed to be zero.
+    uint256 public baselineAddGateCalls;
+    uint256 public baselineRemoveGateCalls;
+
+    /// @dev Incremented after each outer PoolManager.unlock() RETURNS. unlock() reverts
+    ///      CurrencyNotSettled when NonzeroDeltaCount != 0 (PoolManager.sol:112), so a
+    ///      non-zero count here is positive proof that every delta produced by the hook's
+    ///      in-afterSwap modifyLiquidity calls was settled inside that same unlock.
+    uint256 public unlocksCompleted;
 
     enum Step {
         AddInitialLiquidity,
@@ -112,6 +138,12 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
         vm.deal(address(hook), 10 ether);
 
         POOL_MANAGER.unlock(abi.encode(Step.AddInitialLiquidity));
+
+        // Baseline AFTER the seed position is in place. setUp()'s own add is an outsider call
+        // (owner = this test contract, not the hook), so beforeAddLiquidity firing once here is
+        // CORRECT platform behaviour, not a defect.
+        baselineAddGateCalls = hook.addLiquidityGateCalls();
+        baselineRemoveGateCalls = hook.removeLiquidityGateCalls();
     }
 
     // ───────────────────────────────────────────── assertions ──
@@ -124,7 +156,20 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
         bytes32 posKey = Position.calculatePositionKey(address(this), TICK_LOWER, TICK_UPPER, SALT);
         uint128 posLiq = POOL_MANAGER.getPositionLiquidity(poolId, posKey);
         assertEq(posLiq, POSITION_LIQUIDITY, "protocol position liquidity missing");
-        assertEq(address(POOL_MANAGER).balance, 0, "launch must require ZERO protocol ETH");
+
+        // Position-specific zero-ETH proof. An earlier revision asserted
+        // address(POOL_MANAGER).balance == 0, which is INVALID on a fork of the live Robinhood
+        // manager: its global native balance includes unrelated pools. The BalanceDelta our own
+        // modifyLiquidity returned is the only evidence scoped to our position.
+        //   amount0 == 0  -> the position required no currency0 (native ETH) whatsoever
+        //   amount1 <  0  -> we owed the manager token, and only token
+        assertEq(initialLiquidityAmount0, int128(0), "initial position must require ZERO native ETH");
+        assertLt(initialLiquidityAmount1, int128(0), "initial position must be funded in token only");
+
+        // Corroborating, and independent of the manager's global state: adding the position did
+        // not move this contract's ETH at all (a VM call, so no gas is deducted here).
+        assertEq(ethAfterAddLiquidity, ethBeforeAddLiquidity, "adding the position spent ETH");
+
         assertGt(token.balanceOf(address(POOL_MANAGER)), 0, "position must hold token");
 
         (, int24 tick,,) = POOL_MANAGER.getSlot0(poolId);
@@ -137,12 +182,18 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
     function test_2_genuineSwap_thenReanchorInsideAfterSwap() public {
         // Pass 1: hook has no position of its own yet -> mint only.
         POOL_MANAGER.unlock(abi.encode(Step.Swap));
+        unlocksCompleted++;
         assertTrue(hook.mintSucceeded(), "first re-anchor mint did not complete");
         assertFalse(hook.burnAttempted(), "nothing should have been burnable on pass 1");
 
         // Pass 2: the hook now owns a position, so this exercises burn + re-mint.
         POOL_MANAGER.unlock(abi.encode(Step.Swap));
+        unlocksCompleted++;
         assertTrue(hook.burnAttempted(), "pass 2 should have attempted a burn");
+
+        // Both outer unlocks RETURNED, so no CurrencyNotSettled: every delta generated by the
+        // hook's in-afterSwap modifyLiquidity calls settled within the same unlock session.
+        assertEq(unlocksCompleted, 2, "an outer unlock did not complete");
 
         // --- the swap itself was genuine ---
         assertLt(observedSwapAmount0, 0, "core Swap amount0 must be negative (ETH paid in)");
@@ -158,9 +209,32 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
             hook.sqrtPriceBeforeReanchor(), hook.sqrtPriceAfterReanchor(), "re-anchor moved slot0"
         );
 
+        // Pinned from the first successful Robinhood fork run. Deterministic despite the fork:
+        // this pool is created fresh in setUp() at a fixed INIT_TICK and swapped by a fixed
+        // 0.5 ether, so its price does not depend on surrounding chain state. If this value
+        // ever moves, the swap or the re-anchor changed behaviour and that needs explaining.
+        assertEq(
+            hook.sqrtPriceAfterReanchor(),
+            OBSERVED_SQRT_PRICE_AFTER_SECOND_REANCHOR,
+            "slot0 diverged from the value observed on the Robinhood fork"
+        );
+
         // --- v4 noSelfCall must have skipped the hook's own add/remove gates ---
-        assertEq(hook.addLiquidityGateCalls(), 0, "hook's own mint re-entered beforeAddLiquidity");
-        assertEq(hook.removeLiquidityGateCalls(), 0, "hook's own burn re-entered beforeRemoveLiquidity");
+        // Compared against the post-setUp BASELINE, not against zero. setUp()'s seed position is
+        // added by this test contract, i.e. a genuine outsider, so beforeAddLiquidity firing
+        // once there is correct and must not be mistaken for a self-call. What matters is that
+        // neither counter moved across the two afterSwap re-anchors. Real unexpected callbacks
+        // are still caught - nothing is reset or hidden.
+        assertEq(
+            hook.addLiquidityGateCalls(),
+            baselineAddGateCalls,
+            "hook's own re-mint re-entered beforeAddLiquidity"
+        );
+        assertEq(
+            hook.removeLiquidityGateCalls(),
+            baselineRemoveGateCalls,
+            "hook's own burn re-entered beforeRemoveLiquidity"
+        );
 
         // --- the outer unlock closed, so every currency was settled ---
         // (reaching this line at all proves it: unlock() reverts CurrencyNotSettled otherwise)
@@ -189,6 +263,7 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
         Step step = abi.decode(data, (Step));
 
         if (step == Step.AddInitialLiquidity) {
+            ethBeforeAddLiquidity = address(this).balance;
             (BalanceDelta d,) = POOL_MANAGER.modifyLiquidity(
                 key,
                 IPoolManager.ModifyLiquidityParams({
@@ -199,7 +274,10 @@ contract ModifyLiquidityInAfterSwapProbeTest is Test, IUnlockCallback {
                 }),
                 ""
             );
+            initialLiquidityAmount0 = d.amount0();
+            initialLiquidityAmount1 = d.amount1();
             _settleDelta(d);
+            ethAfterAddLiquidity = address(this).balance;
         } else {
             BalanceDelta d = POOL_MANAGER.swap(
                 key,
