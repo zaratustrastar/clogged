@@ -142,6 +142,67 @@ contract BootstrapBuyTest is Test {
         assertEq(uint8(hook.geometryMode(pid)), 2, "must be FOUR_EXACT after the bootstrap trade");
     }
 
+    function _sell(uint256 amt) internal {
+        vm.recordLogs();
+        vm.startPrank(trader);
+        token.approve(address(router), type(uint256).max);
+        router.swap(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: false,
+                amountSpecified: -int256(amt),
+                sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+        vm.stopPrank();
+    }
+
+    uint8 constant NONE = 0;
+    uint8 constant BOUNDARY = 1;
+    uint8 constant FOUR = 2;
+
+    function _mode() internal view returns (uint8) {
+        return uint8(hook.geometryMode(pid));
+    }
+
+    /// @notice The full geometry state machine, including the realETH == 0 boundary.
+    function test_4_modeTransitions() public {
+        assertEq(_mode(), BOUNDARY, "launch must be SINGLE_BOUNDARY");
+
+        _buy(0.5 ether);
+        assertEq(_mode(), FOUR, "first buy must install FOUR_EXACT");
+
+        _buy(0.2 ether);
+        assertEq(_mode(), FOUR, "ordinary trades stay FOUR_EXACT");
+
+        // fully capped sell -> realETH must hit exactly zero, geometry back to the boundary
+        uint256 hookEthBefore = address(hook).balance;
+        _sell(token.balanceOf(trader));
+        assertEq(market.realETH(), 0, "capped sell must drive realETH to 0");
+        assertEq(_mode(), BOUNDARY, "capped sell must install SINGLE_BOUNDARY");
+        assertEq(address(hook).balance, hookEthBefore, "protocol ETH contribution must be 0");
+
+        _buy(0.1 ether);
+        assertEq(_mode(), FOUR, "buy after capped sell must return to FOUR_EXACT");
+    }
+
+    /// @notice Repeat the boundary cycle - it must be stable, not a one-shot.
+    function test_5_repeatedCappedCycles() public {
+        uint256 hookEth0 = address(hook).balance;
+        for (uint256 i = 0; i < 6; i++) {
+            _buy(0.2 ether);
+            assertEq(_mode(), FOUR, "buy should give FOUR_EXACT");
+            uint256 b = token.balanceOf(trader);
+            if (b == 0) break;
+            _sell(b);
+            assertEq(market.realETH(), 0, "cycle must cap");
+            assertEq(_mode(), BOUNDARY, "cycle must return to SINGLE_BOUNDARY");
+        }
+        assertEq(address(hook).balance, hookEth0, "no protocol ETH consumed across cycles");
+    }
+
     /// @notice Many FOUR_EXACT trades: bound the dust empirically rather than assuming it.
     function test_3_dustBoundOverManyTrades() public {
         _buy(0.5 ether);

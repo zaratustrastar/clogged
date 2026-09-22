@@ -293,15 +293,36 @@ contract ClogFourPositionTest is Test {
     }
 
     /// @notice Requirement 8: drive CLOG toward exhaustion.
-    function test_8_clogExhaustion() public {
-        for (uint256 i = 0; i < 80; i++) {
-            if (market.clogRemaining() == 0) break;
-            if (market.physicalInventory() < 20_000_000e18) break;
-            _buy(1 ether); // uncaught: a failure here is a real failure
-            _invariants();
+    /// @notice TERMINAL STATE. Per the product decision, RELEASE_RATIO_BPS stays at 1111 and a
+    ///         non-zero terminal clogRemaining is a documented property of the release algorithm,
+    ///         not a bug. Flooring is per-call, so the exact terminal value is PATH DEPENDENT -
+    ///         measured 244,381.66 under one adaptive schedule - and is therefore NOT hardcoded.
+    ///         What is asserted is the invariant: inventory exhausts, no further buy can deliver,
+    ///         and CLOG is left strictly positive and bounded.
+    function test_8_terminalState() public {
+        uint256 amt = 20 ether;
+        uint256 buys;
+        while (buys < 4000) {
+            if (market.physicalInventory() == 0) break;
+            try this.extBuy(amt) { buys++; }
+            catch {
+                if (amt <= 1) break;
+                amt /= 2; // adaptive, never bypassing physicalInventory
+            }
         }
-        emit log_named_decimal_uint("sold", market.sold(), 18);
-        assertEq(market.clogRemaining(), 0, "CLOG must be fully exhausted");
+        uint256 rem = market.clogRemaining();
+        uint256 released = 100_000_000e18 - rem;
+        emit log_named_uint("buys", buys);
+        emit log_named_decimal_uint("curve tokens delivered (sold)", market.sold(), 18);
+        emit log_named_decimal_uint("CLOG released              ", released, 18);
+        emit log_named_decimal_uint("clogRemaining              ", rem, 18);
+
+        assertEq(market.physicalInventory(), 0, "physicalInventory must reach exactly 0");
+        assertGt(rem, 0, "terminal clogRemaining is non-zero by construction");
+        assertLt(rem, 1_000_000e18, "terminal residual must stay under 1% of the CLOG allocation");
+        // no further valid buy can deliver tokens
+        vm.expectRevert();
+        this.extBuy(0.001 ether);
     }
 
     function extBuy(uint256 a) external { _buy(a); }

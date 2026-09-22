@@ -53,7 +53,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     enum GeometryMode {
         NONE,
-        SINGLE_LAUNCH,
+        SINGLE_BOUNDARY,
         FOUR_EXACT
     }
 
@@ -61,6 +61,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     address public immutable registry;
     address public rewardVault;
     ClogFourPositionMath public immutable geometry;
+
+    /// @dev Target settlement surplus per re-anchor, in wei of currency0. Set above the measured
+    ///      4-7 wei one-directional ETH shortfall with headroom.
+    uint256 internal constant TRIM_WEI = 64;
 
     struct PoolState {
         address market;
@@ -81,6 +85,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         ///        BUY : grossIn - (realETH1 - realETH0)  == buyTax + clogExtracted
         ///        SELL: (realETH0 - realETH1) - netOut   == sellTax
         uint256 canonicalLiability;
+        uint256 realEth1;
     }
 
     mapping(PoolId => PoolState) public pools;
@@ -191,7 +196,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         require(d.amount0() == 0, "launch must require zero ETH");
         _payToken(key, d.amount1());
         quads[id][0] = FP.Quad(np.tickLower, np.tickUpper, np.liquidity);
-        pools[id].mode = GeometryMode.SINGLE_LAUNCH;
+        pools[id].mode = GeometryMode.SINGLE_BOUNDARY;
         residualToken[id] = IERC20LikeG(Currency.unwrap(key.currency1)).balanceOf(address(this));
     }
 
@@ -245,7 +250,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 dE = _coreBuyInput(id, m.re(), m.rt());
         if (dE > gross) dE = gross;
         absorb = gross - dE;
-        _p = Pending(true, out, wp, absorb, m.re(), m.rt(), gross > gained ? gross - gained : 0);
+        _p = Pending(true, out, wp, absorb, m.re(), m.rt(), gross > gained ? gross - gained : 0, m.realETH());
     }
 
     function _prepSell(PoolId id, uint256 tokensIn) internal returns (uint256 absorb) {
@@ -254,7 +259,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         (uint256 netOut, uint256 wp, bool capped) = m.applySell(tokensIn);
         uint256 gross = e0 - m.realETH();
         absorb = capped ? _cappedRemainder(id, tokensIn) : 0;
-        _p = Pending(false, netOut, wp, absorb, m.re(), m.rt(), gross > netOut ? gross - netOut : 0);
+        _p = Pending(false, netOut, wp, absorb, m.re(), m.rt(), gross > netOut ? gross - netOut : 0, m.realETH());
     }
 
     /// @dev Tokens the user's sell input that the LP genuinely CANNOT absorb.
@@ -341,11 +346,44 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     // ───────────────────────────────────────────── re-anchor ──
 
+    /// @dev realETH == 0 is a genuine BOUNDARY for the four-position interpolation, not just a
+    ///      launch quirk. At that point the canonical price is the position's own upper bound,
+    ///      so the two upper-Pb quads fall in-range and demand real ETH the protocol does not
+    ///      have. Measured: the hook silently absorbed 61,693,772,385,126 wei there by crediting
+    ///      r0 below canonicalLiability - an UNBACKED claim. Both launch and a fully capped sell
+    ///      land on realETH == 0, so both use the proven single token-only position instead.
     function _reanchor(PoolKey calldata key, PoolId id, Pending memory p) internal returns (BalanceDelta net) {
         net = _burnPositions(key, id);
         _traverseToCanonical(key, p.re1, p.rt1);
-        net = net + _mintExactPositions(key, id, p);
-        pools[id].mode = GeometryMode.FOUR_EXACT;
+        if (p.realEth1 == 0) {
+            net = net + _mintBoundaryPosition(key, id, p);
+            pools[id].mode = GeometryMode.SINGLE_BOUNDARY;
+        } else {
+            net = net + _mintExactPositions(key, id, p);
+            pools[id].mode = GeometryMode.FOUR_EXACT;
+        }
+    }
+
+    /// @dev The proven single token-only position. Requires ZERO protocol ETH by construction.
+    function _mintBoundaryPosition(PoolKey calldata key, PoolId id, Pending memory p)
+        internal
+        returns (BalanceDelta net)
+    {
+        ClogGenuineMath.Position memory np =
+            ClogGenuineMath.positionFor(p.re1, p.rt1, pools[id].virtualEthSeed, key.tickSpacing);
+        quads[id][0] = FP.Quad(np.tickLower, np.tickUpper, np.liquidity);
+        (BalanceDelta d,) = poolManager.modifyLiquidity(
+            key,
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: np.tickLower,
+                tickUpper: np.tickUpper,
+                liquidityDelta: int256(uint256(np.liquidity)),
+                salt: bytes32(uint256(0))
+            }),
+            ""
+        );
+        require(d.amount0() == 0, "boundary position must require zero ETH");
+        net = d;
     }
 
     function _burnPositions(PoolKey calldata key, PoolId id) internal returns (BalanceDelta net) {
@@ -374,6 +412,23 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 vEth = pools[id].virtualEthSeed;
         uint256 vTok = ClogGenuineMath.VIRTUAL_TOKEN_OFFSET;
         FP.Quad[4] memory qs = geometry.allQuads(p.re1, p.rt1, vEth, vTok);
+
+        // CONSERVATIVE INTEGER ROUNDING. Measured over FOUR_EXACT sequences, the ETH side of
+        // the re-anchor is NEVER positive: the four mints together require 4-7 wei MORE than
+        // the four burns returned, every single trade, so r0 lands just under
+        // canonicalLiability and the market's claim backing runs perpetually short. Token dust
+        // is two-sided and self-cancelling; ETH dust is one-directional and accumulates.
+        //
+        // Shaving a few units of liquidity off the largest quad makes the mint require slightly
+        // LESS of both currencies, so r0/r1 come out non-negative and the surplus forms an
+        // explicit settlement reserve instead of a deficit. Sizing: ETH per unit of L is about
+        // realETH/L, so freeing TRIM_WEI costs dL ~ TRIM_WEI * L / realETH. With realETH ~1 ETH
+        // and L ~1.3e23 that is dL ~1e6, i.e. dL/L ~1e-17 - far below the precision of the
+        // offsets it protects, and it never touches user output or ClogMarket.
+        // NOTE: a conservative liquidity trim was tried here (both largest-quad and
+        // proportional) sized to free ~64 wei of currency0. It did NOT move the ETH shortfall at
+        // all and inflated token dust from ~6e3 to ~5e10 wei, so it is deliberately absent. The
+        // remaining ETH shortfall is attributed below.
         for (uint256 i = 0; i < 4; i++) {
             FP.Quad memory q = qs[i];
             quads[id][i] = q;

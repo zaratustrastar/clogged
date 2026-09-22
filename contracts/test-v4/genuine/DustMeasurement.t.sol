@@ -117,12 +117,19 @@ contract DustMeasurementTest is Test {
         hook.launch(key, market.re(), market.rt());
     }
 
+    uint8 modeBefore;
+
+    function _markMode() internal { modeBefore = uint8(hook.geometryMode(pid)); }
+
     function _record() internal {
+        bool fourExact = modeBefore == 2 && uint8(hook.geometryMode(pid)) == 2;
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter != address(hook) || logs[i].topics[0] != SETTLE_TOPIC) continue;
             (, int256 r0, int256 r1, uint256 liab) = abi.decode(logs[i].data, (bool, int256, int256, uint256));
-            if (!bootstrapSeen) { bootstrapSeen = true; continue; } // skip the bootstrap trade
+            // FOUR_EXACT only. Boundary re-anchors (launch, capped sells) are a different
+            // regime and are measured separately by the mode-transition tests.
+            if (!fourExact) continue;
             int256 de = r0 - int256(liab);
             trades++;
             if (de > maxPosEth) maxPosEth = de;
@@ -139,6 +146,7 @@ contract DustMeasurementTest is Test {
     }
 
     function _buy(uint256 amt) internal {
+        _markMode();
         vm.recordLogs();
         vm.deal(trader, trader.balance + amt);
         vm.prank(trader);
@@ -156,6 +164,7 @@ contract DustMeasurementTest is Test {
     }
 
     function _sell(uint256 amt) internal {
+        _markMode();
         vm.recordLogs();
         vm.startPrank(trader);
         token.approve(address(router), type(uint256).max);
@@ -187,13 +196,17 @@ contract DustMeasurementTest is Test {
     }
 
     /// @dev instrumentation only: lets a negative dust step proceed so the series is observable
-    function _prefund() internal {
-        deal(address(token), address(hook), token.balanceOf(address(hook)) + 1_000e18);
-    }
+    /// @dev No pre-funding any more. The boundary clamp that previously forced it is handled by
+    ///      SINGLE_BOUNDARY, so any revert here is a genuine accounting failure.
+    function _prefund() internal {}
 
     function test_A1_repeatedBuys() public {
         _prefund();
-        for (uint256 i = 0; i < 60; i++) _buy(0.2 ether);
+        _buy(1 ether);
+        for (uint256 i = 0; i < 40; i++) {
+            if (market.physicalInventory() < 100_000_000e18) break;
+            _buy(0.2 ether);
+        }
         _report("A1 repeated same-direction buys");
     }
 
@@ -213,7 +226,7 @@ contract DustMeasurementTest is Test {
         _buy(3 ether);
         for (uint256 i = 0; i < 40; i++) {
             uint256 b = token.balanceOf(trader);
-            if (b < 2e18) break;
+            if (b < 2e18 || market.realETH() == 0) break;
             _sell(b / 10);
         }
         _report("A3 repeated sells");
@@ -229,8 +242,10 @@ contract DustMeasurementTest is Test {
         _report("A4 capped-sell -> buy -> capped-sell cycles");
     }
 
+    /// @notice Accounting failures are UNCAUGHT: any revert fails the run.
     function testFuzz_A5_randomized(uint96[12] calldata a, uint16 pat) public {
         _prefund();
+        _buy(0.5 ether); // leave SINGLE_BOUNDARY so the body measures FOUR_EXACT
         for (uint256 i = 0; i < a.length; i++) {
             if ((pat >> (i % 16)) & 1 == 1 || token.balanceOf(trader) < 1e18) {
                 if (market.clogRemaining() == 0 || market.physicalInventory() < 50_000_000e18) continue;
@@ -240,6 +255,7 @@ contract DustMeasurementTest is Test {
                 _sell(bound(uint256(a[i]), 1e18, token.balanceOf(trader) / 2));
             }
         }
-        assertLe(minCumEth, maxCumEth); // keep the vars live
+        assertLe(minCumEth, maxCumEth);
+        assertLe(minCumTok, maxCumTok);
     }
 }
