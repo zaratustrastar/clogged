@@ -68,7 +68,7 @@ contract RobinhoodForkV2Test is Test {
     uint8 public acceptedParamsLayout; // 6 = with minHopPriceX36, 5 = legacy
 
     address deployer = makeAddr("deployer");
-    address multisig = makeAddr("multisig");
+    address multisig = 0x29DEf4F5429CAC1e364263C449A7aE791657d48F;
     address launcher = makeAddr("launcher");
     address ops = makeAddr("sentinelManager");
     address alice = makeAddr("alice");
@@ -95,12 +95,23 @@ contract RobinhoodForkV2Test is Test {
 
         bytes32 s = keccak256("fork-entropy");
         vm.prank(launcher);
-        registry.commit(keccak256(abi.encode(launcher, keccak256(bytes("FORKV2")), s)));
+        registry.commit(keccak256(abi.encode(launcher, keccak256(bytes("FORKV")), s)));
         vm.warp(vm.getBlockTimestamp() + registry.MIN_REVEAL_DELAY());
         uint256 price = registry.LAUNCH_PRICE();
+        assertEq(price, 0.002 ether, "launch price must be exactly 0.002 ETH");
+        require(multisig.code.length > 0, "real Safe has no code on Robinhood");
+
+        uint256 safeBalanceBefore = multisig.balance;
+        uint256 registryBalanceBefore = address(registry).balance;
+        uint256 rewardVaultBalanceBefore = address(rv).balance;
+
         vm.deal(launcher, 1 ether);
         vm.prank(launcher);
-        tokenId = registry.reveal{value: price}("FORKV2", s);
+        tokenId = registry.reveal{value: price}("FORKV", s);
+
+        assertEq(multisig.balance, safeBalanceBefore + price, "100% launch fee must reach real Safe");
+        assertEq(address(registry).balance, registryBalanceBefore, "Registry must retain zero launch fee");
+        assertEq(address(rv).balance, rewardVaultBalanceBefore, "RewardVault must receive zero launch fee");
         market = ClogMarket(registry.marketOf(tokenId));
         token = MemeToken(registry.tokenOf(tokenId));
         key = PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(token)), fee: 0, tickSpacing: 60, hooks: IHooks(address(hook))});
@@ -129,7 +140,15 @@ contract RobinhoodForkV2Test is Test {
     function _execute(address who, bool z, uint128 amt, uint8 layout) external {
         require(msg.sender == address(this), "internal");
         vm.prank(who);
+        uint256 gasBefore = gasleft();
         UR.execute{value: z ? amt : 0}(abi.encodePacked(V4_SWAP), _urInputs(z, amt, layout), vm.getBlockTimestamp() + 60);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        if (z) {
+            emit log_named_uint("UR BUY gas", gasUsed);
+        } else {
+            emit log_named_uint("UR SELL gas", gasUsed);
+        }
     }
 
     /// @dev Real Universal Router exact-input swap; auto-detects the deployed params layout.

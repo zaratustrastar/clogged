@@ -16,7 +16,7 @@ import {ClogMarket} from "../../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "../mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../../test/mocks/MockTickerNFT.sol";
 import {RewardVault} from "../../src/RewardVault.sol";
-import {SentinelLiquidityHelper as SentinelLiquidityHelperForTest} from "../../script-v4/SentinelLiquidityHelper.sol";
+import {SentinelLiquidityHelper as SentinelLiquidityHelperForTest} from "./fixtures/SentinelLiquidityHelperV1.sol";
 
 /// @notice IMPORTANT LIMITATION, stated plainly: this is a LOCAL SIMULATION standing in for the
 ///         real Robinhood-fork test, not the fork test itself. This sandbox has no network path
@@ -27,9 +27,9 @@ import {SentinelLiquidityHelper as SentinelLiquidityHelperForTest} from "../../s
 ///         canary (same flag bits 0x2088, same non-custodial ClogMarket accounting, same
 ///         SentinelLiquidityHelper contract file used verbatim - not a rewritten copy), the
 ///         proposed sentinel-liquidity probe sequence behaves exactly as intended, step by
-///         step. This test imports script-v4/SentinelLiquidityHelper.sol DIRECTLY (not a copy),
-///         so it exercises the identical bytecode that would actually be used against the real
-///         canary. The actual fork run against the real RPC is something only an environment
+///         step. This test imports the frozen V1 SentinelLiquidityHelper fixture directly,
+///         preserving the exact historical helper logic while keeping obsolete V1 operational
+///         tooling out of the live script-v4 directory. The actual fork run against the real RPC is something only an environment
 ///         with that network access can perform - see this response's own accompanying
 ///         instructions for the exact commands to run it there.
 contract SentinelProbeForkSimulation is Test, IUnlockCallback {

@@ -14,8 +14,8 @@ import {ClogMarket} from "../../src-v4/ClogMarket.sol";
 import {MinimalMockToken} from "../mocks/MinimalMockToken.sol";
 import {MockTickerNFT} from "../../test/mocks/MockTickerNFT.sol";
 import {RewardVault} from "../../src/RewardVault.sol";
-import {SentinelLiquidityProbe} from "../../script-v4/SentinelLiquidityProbe.s.sol";
-import {SentinelLiquidityHelper} from "../../script-v4/SentinelLiquidityHelper.sol";
+import {SentinelLiquidityProbe} from "./fixtures/SentinelLiquidityProbeV1.sol";
+import {SentinelLiquidityHelper} from "./fixtures/SentinelLiquidityHelperV1.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 /// @notice Proves the FIXED CREATE2 prediction (using the deterministic deployment proxy as
