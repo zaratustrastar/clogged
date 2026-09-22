@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {NoopEligibility} from "./mocks/NoopEligibility.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
@@ -86,7 +87,7 @@ contract ClogV4HookBuySellTest is Test, IUnlockCallback {
         token = new MinimalMockToken();
         tickerNFT = new MockTickerNFT();
         tickerNFT.setOwner(TICKER_TOKEN_ID, tickerOwner);
-        market = new ClogMarket(HOOK_ADDRESS, address(token), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS, address(new NoopEligibility()));
 
         key = PoolKey({
             currency0: Currency.wrap(address(0)), // native ETH

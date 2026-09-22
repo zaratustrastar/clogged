@@ -14,6 +14,12 @@ interface IClogV4HookWithdrawal {
 
 /// @notice Minimal ERC20 interface for this market's one-time launch-deposit transfer - kept
 ///         separate from a full IERC20 import for the same reason as the interfaces above.
+/// @notice EligibilityRegistry's per-trade hook - identical to production BondingCurveClog's
+///         IEligibilityTouch.
+interface IEligibilityTouch {
+    function onTrade(uint256 tokenId) external;
+}
+
 interface IERC20Like {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
@@ -92,6 +98,11 @@ contract ClogMarket {
     address public immutable tickerNFT; // ERC721 whose ownerOf(tickerTokenId) IS the ticker-owner fee recipient - resolved dynamically on every trade, never cached, matching production exactly
     uint256 public immutable tickerTokenId;
     address public immutable multisig;
+    /// @notice Notified on EVERY successful trade, as the LAST step of applyBuy/applySell,
+    ///         unwrapped (atomic) - restored to match production BondingCurveClog exactly. Also
+    ///         calls back realReserve()/progressBps() below, which EligibilityRegistry._touch
+    ///         requires; without them, even permissionless qualify(tokenId) reverts.
+    address public immutable eligibilityRegistry;
 
     uint256 public re; // virtualEthSeed + realETH, always - drives curve pricing
     uint256 public rt; // token-side PRICING reserve (virtual - starts far above physical supply, by design)
@@ -127,8 +138,22 @@ contract ClogMarket {
         _;
     }
 
-    constructor(address hook_, address token_, address tickerNFT_, uint256 tickerTokenId_, address multisig_, uint256 virtualEthSeed_, uint256 bufferMultiplierBps_) {
-        require(hook_ != address(0) && token_ != address(0) && tickerNFT_ != address(0) && multisig_ != address(0), "zero address");
+    constructor(
+        address hook_,
+        address token_,
+        address tickerNFT_,
+        uint256 tickerTokenId_,
+        address multisig_,
+        uint256 virtualEthSeed_,
+        uint256 bufferMultiplierBps_,
+        address eligibilityRegistry_
+    ) {
+        require(
+            hook_ != address(0) && token_ != address(0) && tickerNFT_ != address(0) && multisig_ != address(0)
+                && eligibilityRegistry_ != address(0),
+            "zero address"
+        );
+        eligibilityRegistry = eligibilityRegistry_;
         require(virtualEthSeed_ > 0 && bufferMultiplierBps_ > 0, "zero seed");
         hook = hook_;
         token = token_;
@@ -184,6 +209,7 @@ contract ClogMarket {
         winnerPotShare = taxWinnerPotShare + clogWinnerPotShare;
 
         emit Bought(grossInput, tax, curveTokens, clogTokens, clogExtracted, clogRetained, re, rt);
+        _touchEligibility();
     }
 
     /// @dev Solves the fixed-point curve/CLOG budget split, then applies BOTH legs to state in
@@ -360,6 +386,7 @@ contract ClogMarket {
         // winnerPotShare is returned (not accumulated here) - see applyBuy's own docs above for why.
 
         emit Sold(tokensIn, grossPayout, tax, netEthOut, wasCapped, re, rt);
+        _touchEligibility();
     }
 
     /// @notice Permissionless trigger for pulling `to`'s accumulated pendingWithdrawals out as
@@ -410,6 +437,24 @@ contract ClogMarket {
         uint256 balance = IERC20Like(token_).balanceOf(address(this));
         require(balance > 0, "nothing to deposit");
         require(IERC20Like(token_).transfer(to, balance), "token transfer failed");
+    }
+
+    /// @notice EligibilityRegistry reserve input - identical to production: realETH.
+    function realReserve() external view returns (uint256) {
+        return realETH;
+    }
+
+    /// @notice EligibilityRegistry progress input - identical to production:
+    ///         mulDiv(sold, BPS, CURVE_ALLOCATION).
+    function progressBps() external view returns (uint256) {
+        return Math.mulDiv(sold, BPS, CURVE_ALLOCATION);
+    }
+
+    /// @dev Unwrapped external call, LAST step of every trade - see production
+    ///      BondingCurveClog._touchEligibility for why best-effort/try-catch was rejected: a
+    ///      swallowed touch on a below-threshold sell would leave a stale streak.
+    function _touchEligibility() internal {
+        IEligibilityTouch(eligibilityRegistry).onTrade(tickerTokenId);
     }
 
     /// @dev Pull-payment credit - mirrors production's own _credit exactly.

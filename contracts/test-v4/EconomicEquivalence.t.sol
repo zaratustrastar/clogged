@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {NoopEligibility} from "./mocks/NoopEligibility.sol";
 import {BondingCurveClog} from "../src/BondingCurveClog.sol";
 import {MemeToken} from "../src/MemeToken.sol";
 import {EligibilityRegistry} from "../src/EligibilityRegistry.sol";
@@ -75,7 +76,7 @@ contract EconomicEquivalenceTest is Test {
         engine.registerToken(address(production));
 
         // ── v4 ClogMarket - IDENTICAL initial parameters, this test contract as its own hook ──
-        v4Market = new ClogMarket(address(this), address(productionToken), address(tickerNFT), 1, multisig, virtualEthSeed, BUFFER_BPS);
+        v4Market = new ClogMarket(address(this), address(productionToken), address(tickerNFT), 1, multisig, virtualEthSeed, BUFFER_BPS, address(new NoopEligibility()));
 
         // A real RewardVault, standing in for what the real ClogV4Hook would route WinnerPot's
         // own share to on every trade - poolManager is never actually invoked in this harness

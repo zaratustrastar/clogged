@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {NoopEligibility} from "./mocks/NoopEligibility.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
@@ -61,7 +62,7 @@ contract RewardVaultV4ModeTest is Test, IUnlockCallback {
         // totalSupplyTwab, which MinimalMockToken (used elsewhere in this profile) doesn't
         // implement.
         token = new MemeToken("Cat", "CAT", address(this));
-        market = new ClogMarket(HOOK_ADDRESS, address(token), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        market = new ClogMarket(HOOK_ADDRESS, address(token), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS, address(new NoopEligibility()));
         token.setMarket(address(market)); // mints the full 1B to the market, sets marketInitializedAt = now
 
         windowOpen = block.timestamp;

@@ -8,7 +8,16 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {MemeToken} from "../src/MemeToken.sol";
 import {ClogMarket} from "./ClogMarket.sol";
-import {ClogV4Hook} from "./ClogV4Hook.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
+
+/// @notice The three launch-time calls this registry makes into the universal hook. Both
+///         ClogV4Hook (V1) and ClogV4HookV2 expose exactly these signatures.
+interface IClogLaunchHook {
+    function setRewardVault(address rewardVault_) external;
+    function registerMarket(PoolKey calldata key, address market) external;
+    function depositMarketInventory(address market, address tokenAddress, PoolKey calldata key) external;
+}
 
 interface ITickerNFTForV4Launch {
     function mint(address to, uint256 tokenId) external;
@@ -83,7 +92,7 @@ contract TickerRegistryV4 is ReentrancyGuard {
     // construction time would recreate exactly the circular CREATE/CREATE2 dependency already
     // fixed once for the hook<->RewardVault relationship - the same fix applies here.
     IPoolManager public poolManager;
-    ClogV4Hook public hook;
+    IClogLaunchHook public hook;
     address public rewardVault; // launch-fee WinnerPot leg pushes here directly, exactly like v2's own winnerPot push - unrelated to per-trade claim-native routing
 
     uint256 public publicTickerCount;
@@ -129,7 +138,7 @@ contract TickerRegistryV4 is ReentrancyGuard {
         require(address(poolManager) == address(0), "already configured");
         require(poolManager_ != address(0) && hook_ != address(0) && rewardVault_ != address(0), "zero address");
         poolManager = IPoolManager(poolManager_);
-        hook = ClogV4Hook(hook_);
+        hook = IClogLaunchHook(hook_);
         rewardVault = rewardVault_;
         hook.setRewardVault(rewardVault_);
         emit V4InfrastructureConfigured(poolManager_, hook_, rewardVault_);
@@ -179,7 +188,14 @@ contract TickerRegistryV4 is ReentrancyGuard {
         tokenId = eligibilityRegistry.nextTokenId();
 
         ClogMarket market = new ClogMarket(
-            address(hook), address(token), address(tickerNFT), tokenId, multisig, virtualEthSeed, bufferBps
+            address(hook),
+            address(token),
+            address(tickerNFT),
+            tokenId,
+            multisig,
+            virtualEthSeed,
+            bufferBps,
+            address(eligibilityRegistry)
         );
         token.setMarket(address(market)); // mints the full 1B supply, locks the market forever
 
@@ -195,7 +211,7 @@ contract TickerRegistryV4 is ReentrancyGuard {
         // register BEFORE initialize (beforeInitialize checks this), initialize, THEN deposit -
         // the market never holds its own supply for longer than this one transaction takes.
         hook.registerMarket(key, address(market));
-        poolManager.initialize(key, _initialSqrtPriceX96());
+        poolManager.initialize(key, _canonicalSqrtPriceX96(market));
         hook.depositMarketInventory(address(market), address(token), key);
         market.grantHookApprovals(address(poolManager));
 
@@ -206,10 +222,16 @@ contract TickerRegistryV4 is ReentrancyGuard {
         tokenOf[tokenId] = address(token);
     }
 
-    /// @dev sqrtPriceX96 for a nominal price of 1 (irrelevant to actual trading - the curve is
-    ///      fully hook-driven, exactly as documented throughout this profile's other tests).
-    function _initialSqrtPriceX96() internal pure returns (uint160) {
-        return 79228162514264337593543950336;
+    /// @dev CORRECTED (was a hardcoded Q96 = nominal 1:1, which third-party terminals read as
+    ///      1 token = 1 ETH). PoolKey is currency0 = ETH, currency1 = token, and sqrtPriceX96 is
+    ///      sqrt(currency1/currency0) * 2^96 = sqrt(rt/re) * 2^96, derived from the market's own
+    ///      initial reserves (virtualEthSeed, CURVE_ALLOCATION * bufferBps / BPS) - the same
+    ///      formula ClogV4HookV2.canonicalSqrtPriceX96 enforces in beforeInitialize.
+    function _canonicalSqrtPriceX96(ClogMarket market) internal view returns (uint160) {
+        uint256 s = Math.sqrt(Math.mulDiv(market.rt(), 1 << 192, market.re()));
+        if (s < TickMath.MIN_SQRT_PRICE) return TickMath.MIN_SQRT_PRICE;
+        if (s >= TickMath.MAX_SQRT_PRICE) return TickMath.MAX_SQRT_PRICE - 1;
+        return uint160(s);
     }
 
     function _routeLaunchPayment() internal {

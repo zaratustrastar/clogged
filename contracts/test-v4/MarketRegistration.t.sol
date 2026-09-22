@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {NoopEligibility} from "./mocks/NoopEligibility.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
@@ -47,7 +48,7 @@ contract MarketRegistrationTest is Test {
 
     function _realMarketAndToken() internal returns (ClogMarket m, MinimalMockToken t) {
         t = new MinimalMockToken();
-        m = new ClogMarket(HOOK_ADDRESS, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        m = new ClogMarket(HOOK_ADDRESS, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS, address(new NoopEligibility()));
     }
 
     // ── Authorized caller, wrong token paired against a real market ─────────────────────────
@@ -86,7 +87,7 @@ contract MarketRegistrationTest is Test {
         // A market constructed pointing at a DIFFERENT hook than the one performing registration -
         // its own onlyHook modifier would reject every real trade call anyway, but this must be
         // caught at registration time, not discovered later as a silently-dead market.
-        ClogMarket misconfiguredMarket = new ClogMarket(differentHook, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        ClogMarket misconfiguredMarket = new ClogMarket(differentHook, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS, address(new NoopEligibility()));
 
         PoolKey memory key =
             PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(HOOK_ADDRESS)});
@@ -135,7 +136,7 @@ contract MarketRegistrationTest is Test {
         ClogV4Hook freshHook = ClogV4Hook(freshHookAddress);
 
         MinimalMockToken t = new MinimalMockToken();
-        ClogMarket m = new ClogMarket(freshHookAddress, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS);
+        ClogMarket m = new ClogMarket(freshHookAddress, address(t), address(tickerNFT), TICKER_TOKEN_ID, multisig, VIRTUAL_ETH_SEED, BUFFER_MULTIPLIER_BPS, address(new NoopEligibility()));
         PoolKey memory key =
             PoolKey({currency0: Currency.wrap(address(0)), currency1: Currency.wrap(address(t)), fee: 0, tickSpacing: 60, hooks: IHooks(freshHookAddress)});
 
