@@ -89,8 +89,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         uint256 canonicalOut; // buy: tokens to user. sell: net ETH to user.
         uint256 winnerPotShare;
         uint256 absorbed; // specified-side BeforeSwapDelta
+        uint256 grossIn; // buy: full gross ETH input
         uint256 re1;
         uint256 rt1;
+        uint256 realEth0;
         uint256 realEth1;
         uint256 physInv1;
     }
@@ -101,6 +103,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     mapping(PoolId => uint256) public residualToken;
     mapping(PoolId => uint256) public residualEth;
     mapping(address => bool) public isMarket;
+    /// @notice ETH liability backing that a few-wei rounding deficit forced us to defer, repaid
+    ///         out of the next positive rounding. Bounded and asserted in tests.
+    mapping(PoolId => uint256) public deferredEthLiability;
+    mapping(PoolId => uint256) public maxDeferredEthLiability;
 
     Pending internal _p;
 
@@ -112,6 +118,12 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     error VaultNotSet();
     error TokenResidualExhausted(uint256 due, uint256 held);
     error EthResidualExhausted(uint256 due, uint256 held);
+
+    /// @notice Per-trade ETH rounding telemetry. `canonicalLiability` is derived from UNCHANGED
+    ///         ClogMarket state, never from actualR0, so the two are independent.
+    event EthRounding(
+        bool isBuy, int256 actualR0, uint256 canonicalLiability, int256 roundingEth, uint256 residualEthAfter
+    );
 
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
@@ -250,6 +262,7 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         ClogMarket m = ClogMarket(ps.market);
 
         uint256 absorb;
+        uint256 realEth0 = m.realETH(); // captured BEFORE the canonical transition
         if (params.zeroForOne) {
             (uint256 out, uint256 wp) = m.applyBuy(specified);
             uint160 sqrtT = ClogGenuineMath.sqrtPriceX96Of(m.re(), m.rt());
@@ -267,8 +280,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
                 canonicalOut: out,
                 winnerPotShare: wp,
                 absorbed: absorb,
+                grossIn: specified,
                 re1: m.re(),
                 rt1: m.rt(),
+                realEth0: realEth0,
                 realEth1: m.realETH(),
                 physInv1: m.physicalInventory()
             });
@@ -286,8 +301,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
                 canonicalOut: netOut,
                 winnerPotShare: wp,
                 absorbed: absorb,
+                grossIn: specified,
                 re1: m.re(),
                 rt1: m.rt(),
+                realEth0: realEth0,
                 realEth1: m.realETH(),
                 physInv1: m.physicalInventory()
             });
@@ -430,25 +447,86 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     ///      side is turned into ERC6909 claims (market + RewardVault) exactly as ClogV4HookV2
     ///      did, so ClogMarket.withdraw() is unchanged. R < 0 means the hook owes and pays from
     ///      its tracked residual.
+    /// @dev Canonical ETH liability for this trade, derived purely from ClogMarket state.
+    ///        BUY : grossInput - (realETH1 - realETH0)  == buyTax + clogExtracted
+    ///        SELL: (realETH0 - realETH1) - canonicalNetOut == sellTax
+    function _canonicalLiability(Pending memory p) internal pure returns (uint256) {
+        if (p.isBuy) {
+            uint256 gained = p.realEth1 - p.realEth0;
+            return p.grossIn > gained ? p.grossIn - gained : 0;
+        }
+        uint256 gross = p.realEth0 - p.realEth1;
+        return gross > p.canonicalOut ? gross - p.canonicalOut : 0;
+    }
+
     function _resolve(PoolKey calldata key, PoolId id, int256 r0, int256 r1, Pending memory p) internal {
         PoolState storage ps = pools[id];
+        {
+            uint256 liab = _canonicalLiability(p);
+            emit EthRounding(p.isBuy, r0, liab, r0 - int256(liab), residualEth[id]);
+        }
 
-        if (r0 > 0) {
-            uint256 owed = uint256(r0);
-            uint256 wp = p.winnerPotShare;
-            if (wp > owed) wp = owed;
-            if (wp > 0) {
-                poolManager.mint(rewardVault, _cid(key.currency0), wp);
-                IRewardVaultRecorderG(rewardVault).recordWinnerPotClaim(wp);
+        // ── ETH side: canonical liability EXACT, rounding to a hook-owned claim ────────
+        // The continuous algebra says r0 == tax + clogExtracted. Tick-rounded v4 geometry makes
+        // the realised r0 differ by an epsilon. Previously EVERY positive r0 was paid out as
+        // economic revenue, so that epsilon was given away as market/RewardVault claims - and
+        // the first buy alone donates +2.06e14 wei. A later -2.7e13 shortfall then had nothing
+        // to draw on, which is what produced EthResidualExhausted(..., 0).
+        //
+        // Now the rounding is separated from the economics and parked as the hook's OWN native
+        // ERC6909 claim (currency id 0), exactly as V2 uses mint/burn for native claims. No
+        // external ETH ever enters: the reserve is funded purely by positive rounding.
+        //
+        // Delta arithmetic (hook ledger starts at r0):
+        //   rounding > 0 : mint(self, rounding)  -> ledger = r0 - rounding = liability
+        //   rounding < 0 : burn(self, -rounding) -> ledger = r0 + (-rounding) = liability
+        //   then mint(liability) to vault + market -> ledger = 0
+        {
+            uint256 liab = _canonicalLiability(p);
+            int256 rounding = r0 - int256(liab);
+
+            uint256 deficit;
+            if (rounding > 0) {
+                poolManager.mint(address(this), _cid(key.currency0), uint256(rounding));
+                residualEth[id] += uint256(rounding);
+            } else if (rounding < 0) {
+                uint256 need = uint256(-rounding);
+                uint256 held = residualEth[id];
+                uint256 take = need > held ? held : need;
+                if (take > 0) poolManager.burn(address(this), _cid(key.currency0), take);
+                residualEth[id] = held - take;
+                deficit = need - take; // a few wei at most; repaid below on the next positive
             }
-            uint256 rest = owed - wp;
-            if (rest > 0) poolManager.mint(ps.market, _cid(key.currency0), rest);
-        } else if (r0 < 0) {
-            uint256 due = uint256(-r0);
-            uint256 held = residualEth[id];
-            if (held < due) revert EthResidualExhausted(due, held);
-            poolManager.settle{value: due}();
-            residualEth[id] = held - due;
+
+            // Repay any previously deferred backing out of the reserve, before paying out.
+            uint256 owedBack = deferredEthLiability[id];
+            if (owedBack > 0 && residualEth[id] > 0) {
+                uint256 r = owedBack > residualEth[id] ? residualEth[id] : owedBack;
+                poolManager.burn(address(this), _cid(key.currency0), r);
+                residualEth[id] -= r;
+                deferredEthLiability[id] = owedBack - r;
+                poolManager.mint(ps.market, _cid(key.currency0), r);
+            }
+
+            // EXACT canonical liability. The WinnerPot share is paid in full first - it is an
+            // external claim - and only the market's portion can absorb a deficit, which is
+            // recorded and repaid from the next positive rounding.
+            uint256 payable_ = liab > deficit ? liab - deficit : 0;
+            if (deficit > 0) {
+                uint256 d = deferredEthLiability[id] + deficit;
+                deferredEthLiability[id] = d;
+                if (d > maxDeferredEthLiability[id]) maxDeferredEthLiability[id] = d;
+            }
+            if (payable_ > 0) {
+                uint256 wp = p.winnerPotShare;
+                if (wp > payable_) wp = payable_;
+                if (wp > 0) {
+                    poolManager.mint(rewardVault, _cid(key.currency0), wp);
+                    IRewardVaultRecorderG(rewardVault).recordWinnerPotClaim(wp);
+                }
+                uint256 rest = payable_ - wp;
+                if (rest > 0) poolManager.mint(ps.market, _cid(key.currency0), rest);
+            }
         }
 
         // Token side: settle against the hook's REAL token balance (the tracked tick-rounding

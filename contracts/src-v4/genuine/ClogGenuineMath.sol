@@ -61,6 +61,9 @@ library ClogGenuineMath {
 
     uint256 internal constant Q96 = 0x1000000000000000000000000;
 
+    /// @dev Spacings to raise tickLower by. Sized from measured reserve drawdown under fuzzing.
+    int24 internal constant TICK_LOWER_BUMP = 6;
+
     error PriceOutOfRange();
     error DegenerateState();
 
@@ -135,7 +138,12 @@ library ClogGenuineMath {
         // launch residual could supply (74,866 needed vs 58,405 held on the first buy - caught
         // by the differential suite). The range given up lies below the solvency cap, where the
         // position holds no ETH to pay out anyway.
-        tL = _ceilTo(tL, tickSpacing) + tickSpacing;
+        // Bumped by TICK_LOWER_BUMP spacings, not one. Each extra tick raises Pa and so lowers
+        // the position's token requirement, enlarging the hook's tracked token reserve. With a
+        // single bump the reserve drained to 23,196 against a 75,387 demand under randomized
+        // interleavings. The range surrendered lies below the solvency cap, where the position
+        // holds no ETH to pay out anyway.
+        tL = _ceilTo(tL, tickSpacing) + tickSpacing * TICK_LOWER_BUMP;
         if (tL >= tU) revert DegenerateState();
 
         p.tickLower = tL;

@@ -1,94 +1,84 @@
 # Architecture B — Genuine Liquidity Prototype
 
-Branch `v4-genuine-liquidity-prototype`, forked from `422a61a`.
+Branch `v4-genuine-liquidity-prototype`, forked from `422a61a`. `ClogMarket.sol` byte-identical.
 
-## STATUS (fifth commit) — capped sells SOLVED; one open ETH-rounding defect
+## STATUS (sixth commit) — ETH rounding hypothesis CONFIRMED; randomized still not green
 
-`forge test --profile v4`: **149 passed, 0 failed, 3 skipped** (152 total). Foundry 1.8.3 +
-solc 0.8.26 locally, so these are measured. `ClogMarket.sol` is **byte-identical to `422a61a`**.
+`forge test --profile v4`: **150 passed, 0 failed, 3 skipped**.
 
-## Capped sells — design and proof
+### The hypothesis was right
 
-The `EthResidualExhausted(0.553 ETH, 0)` revert was never a funding problem. Measured:
+`residualEth` was declared but **never credited** — only consumed. And `_resolve` treated every
+positive `r0` as economic revenue, when the continuous algebra only guarantees
+`r0 == tax + clogExtracted`. Instrumenting `canonicalLiability` independently from unchanged
+`ClogMarket` state showed it immediately, on the very first buy:
 
-| | |
-|---|---|
-| canonical target `rt1/re1` | `224,552,509.2833` |
-| new position upper bound `Pb_new` | `224,552,509.2833` — **identical** |
-| old bound `Pb_old` reachable by the core swap | `199,126,179.5488` |
-| `Pb_new / Pb_old` | **1.127690** |
-| ETH the mint demanded at `slot0 = Pb_old` | **0.557345 ETH** |
-| observed revert | `EthResidualExhausted(0.553 ETH, 0)` |
+```
+BUY   actualR0           = 1,637,839,902,439,969
+      canonicalLiability = 1,431,907,322,368,047      (derived from ClogMarket, not from r0)
+      roundingEth        = +205,932,580,071,922       (+0.000206 ETH)
+      residualEth        = 0
+```
 
-A capped sell ends canonically at `realETH1 == 0`, i.e. price **at the new position's upper
-bound**. The user's core swap can only reach the OLD bound — that is where the old position's
-real ETH runs out. Minting the new position while `slot0` still sat at `Pb_old` put the price
-INSIDE the new range, so the position demanded real ETH.
+That +2.06e14 was being paid out as market/RewardVault claims. The later shortfall was only
+**-2.7e13**, an order of magnitude smaller — so the reserve would have covered it easily had it
+ever been credited. It was accounting, not geometry.
 
-**Solution — zero-liquidity price traversal (approach A).** Verified against pinned v4-core:
-`SwapMath.computeSwapStep` with `liquidity == 0` computes `amountIn` via
-`getAmountXDelta(..., 0, true)` which is **0**, so `amountRemainingLessFee >= amountIn` holds and
-the step sets `sqrtPriceNextX96 = sqrtPriceTargetX96`. The price walks to
-`sqrtPriceLimitX96` **exchanging nothing**, returning a zero `BalanceDelta`.
+Note the epsilon is **not random noise**: it is the systematic tick-rounding geometry offset
+(the rounded position holds less real ETH than canonical at the same price), and it flips sign
+with price direction.
 
-Order inside `afterSwap`: burn the old position (pool now has zero liquidity at every tick) →
-swap with `sqrtPriceLimitX96 = sqrt(rt1/re1)` to walk `slot0` to canonical for free → mint the
-new position, now exactly at its upper bound where it is 100% token and needs **zero ETH**.
-`Hooks.sol:252/292` skip `beforeSwap`/`afterSwap` when `msg.sender == address(self)`, so it
-cannot recurse. It is not a calibration swap: it exchanges nothing and exists only because the
-burn emptied the pool.
+### Implemented
 
-Proven by `test_cappedSell_zeroProtocolEth_exactCanonical`: `realETH1 == 0`,
-`re1 == 9 ether` exactly, `rt1 == rt0 + FULL tokensIn`,
-`physicalInventory1 == inv0 + tokensIn`, user payout == canonical to the wei,
-`slot0 == sqrt(rt1/re1)`, hook ETH balance unchanged (**zero protocol contribution**), unlock
-closes with no unresolved delta. Only the user's net payout leaves PoolManager; the 0.6% tax
-stays as ERC6909 claim backing.
+Symmetric ETH ledger using native ERC6909 claims (currency id 0, same mechanism V2 uses), zero
+external ETH:
 
-## Coverage now green
+```
+rounding > 0 : mint(self, rounding);  residualEth += rounding
+rounding < 0 : burn(self, need);      residualEth -= need
+then          : mint EXACTLY canonicalLiability -> RewardVault (WinnerPot) + market
+```
 
-launch (zero ETH, token-only) · first/tiny/repeated buys · ordinary sell · **capped sell** ·
-alternating · large buy → large sell · new-HWM + CLOG release · CLOG drawdown ·
-owner/multisig/WinnerPot liabilities vs canonical · withdrawal pays exact liability ·
-unauthorized liquidity reverts · both invariants under 256-run fuzz · `slot0` canonical after
-every trade.
+The originally failing seed now **passes**, and fuzzing reaches run ~183 instead of ~4.
 
-## Measured gas / size
+### Still NOT solved — randomized differential remains skipped
+
+Two obstacles, both surfaced only by fuzzing:
+
+1. **The token side has the same disease.** `residualToken` drained to 23,196 against a 75,387
+   demand. Raising `TICK_LOWER_BUMP` to 6 spacings pushed it further out (launch reserve now
+   298,424 tokens, max drawdown 238,868) but did not eliminate it.
+2. **Deficit can exceed the trade's own liability.** On trades with little or no tax,
+   `payable_` clamps to 0 while the hook's ledger sits at `liab - deficit < 0` and nothing can
+   cover it → `CurrencyNotSettled()`.
+
+Per the agreed stop condition, the residual-ledger idea **alone is insufficient**: position
+rounding needs revisiting, exactly as anticipated. The token side needs the same
+canonical-vs-rounding separation the ETH side just received, and the ETH deficit needs a source
+that does not depend on the current trade carrying enough liability.
+
+### Measured
 
 | | |
 |---|---|
 | launch | 435,561 |
-| first buy | **1,016,404** |
-| subsequent buy | **704,550** |
-| ordinary sell | **576,522** |
-| capped sell | **696,187** |
-| runtime size | **13,543 bytes** (EIP-170 24,576) |
-| launch `residualToken` | 98,403 tokens (0.0098% of supply) |
-| max `residualToken` observed over a 40-buy run | **38,843 tokens** — stays below launch |
+| first buy | **1,096,441** |
+| subsequent buy | **769,986** |
+| ordinary sell | **642,740** |
+| capped sell | **805,424** |
+| runtime size | **14,686 bytes** (EIP-170 24,576) |
+| launch `residualToken` | 298,424 (0.0298% of supply) |
+| max `residualToken` observed | 238,868 |
+| max `residualEth` observed | not reportable — fuzz does not complete |
 
-## OPEN DEFECT — randomized differential is SKIPPED, not passing
+Gas rose ~8% vs the previous commit from the ERC6909 ledger plus the wider tick bump.
 
-`testFuzz_randomizedDifferential` is `vm.skip(true)`. The fuzzer reliably finds interleavings
-where the hook ends an `afterSwap` owing ~**2.7e13 wei (0.000027 ETH)** it does not hold:
-`EthResidualExhausted(27050896760906, 0)`.
+### Gaps
 
-Diagnosis: on a sell the hook returns `hd0 = coreEth - canonicalNet`. In those interleavings the
-tick-rounded position under-delivers ETH relative to canonical, so `hd0` goes **negative** and
-the hook must top the user up from an ETH balance it has no legitimate source for.
-
-Three fixes were tried and **rejected**: capping `L` against canonical `realETH1`, against a
-round-up ETH requirement, and against the unlock's actually-available ETH. All three left the
-shortfall byte-identical, because capping `L` makes the core swap under-deliver and merely moves
-the deficit into `hd0`. This is the ETH-side analogue of the `tickLower` rounding fix that solved
-the token side, and it is **not solved**.
-
-## Remaining gaps
-
-1. The ETH-rounding defect above — randomized sequences are not covered.
-2. Registry genuine-liquidity launch path not implemented (0.002 ETH fee → Safe, TickerNFT mint
-   are not exercised end to end; the suite wires launch manually).
-3. Complete CLOG exhaustion not reached (40 buys left `clogRemaining` at 1.38e24).
-4. Fork suite (V4Quoter / Universal Router / Permit2) deliberately deferred to `clogrun`.
+1. Randomized differential skipped (above). **Registry/fork work is blocked on it by instruction.**
+2. Registry genuine-liquidity launch path not implemented.
+3. Complete CLOG exhaustion not reached.
+4. Fork suite deferred to `clogrun`.
 
 ---
 

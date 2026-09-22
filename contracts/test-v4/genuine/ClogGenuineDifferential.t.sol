@@ -430,25 +430,76 @@ contract ClogGenuineDifferentialTest is Test {
         _assertSlot0Canonical();
     }
 
-    /// @notice Randomized differential: arbitrary interleavings must stay bit-exact.
-    /// @dev SKIPPED - KNOWN OPEN DEFECT, NOT A HIDDEN FAILURE. Deterministic sequences all pass,
-    ///      but the fuzzer reliably finds interleavings where the hook ends an afterSwap owing
-    ///      ~2.7e13 wei (0.000027 ETH) it does not hold:
-    ///        EthResidualExhausted(27050896760906, 0)
-    ///      Diagnosis: on a sell the hook returns hd0 = coreEth - canonicalNet. In these
-    ///      interleavings the tick-rounded position under-delivers ETH relative to canonical,
-    ///      so hd0 goes NEGATIVE and the hook must top the user up from an ETH balance it has
-    ///      no legitimate source for.
-    ///      Three fixes were tried and REJECTED: capping L against canonical realETH1, against
-    ///      a round-up ETH requirement, and against the unlock's actually-available ETH. All
-    ///      three left the shortfall byte-identical, because capping L makes the core swap
-    ///      under-deliver and simply moves the deficit into hd0.
-    ///      This needs a design decision on the ETH-side rounding direction, exactly as the
-    ///      token side needed tickLower to round up. It is the ETH analogue of that fix and is
-    ///      NOT solved. Do not treat the suite's green status as covering this.
+    /// @notice Replays the EXACT counterexample the fuzzer found, with rounding telemetry.
+    function test_replayFailingSeed_ethRoundingTelemetry() public {
+        uint96[10] memory amts = [
+            uint96(31210083429276513), uint96(13985), uint96(21275), uint96(72895),
+            uint96(79228162514264337593543950334), uint96(492057647657475020914),
+            uint96(403733127), uint96(26263571651823472), uint96(3523854868800343737),
+            uint96(11158)
+        ];
+        uint8 pattern = 1;
+        int256 cum;
+        vm.recordLogs();
+        for (uint256 i = 0; i < amts.length; i++) {
+            bool doBuy = (pattern >> (i % 8)) & 1 == 1 || token.balanceOf(trader) == 0;
+            if (doBuy) {
+                uint256 amt = bound(uint256(amts[i]), 0.0001 ether, 1.5 ether);
+                try ref.applyBuy(amt) { _buy(amt); } catch { continue; }
+            } else {
+                uint256 bal = token.balanceOf(trader);
+                if (bal < 1e18) continue;
+                uint256 amt = bound(uint256(amts[i]), 1e18, bal);
+                try ref.applySell(amt) { _sell(amt); } catch { continue; }
+            }
+            cum += _lastRounding();
+            emit log_named_int("cumulative roundingEth", cum);
+        }
+    }
+
+    bytes32 constant ROUNDING_TOPIC =
+        keccak256("EthRounding(bool,int256,uint256,int256,uint256)");
+
+    function _lastRounding() internal returns (int256 rounding) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(hook) && logs[i].topics[0] == ROUNDING_TOPIC) {
+                (bool isBuy, int256 actualR0, uint256 liab, int256 r, uint256 resid) =
+                    abi.decode(logs[i].data, (bool, int256, uint256, int256, uint256));
+                emit log_string(isBuy ? "  BUY" : "  SELL");
+                emit log_named_int("    actualR0          ", actualR0);
+                emit log_named_uint("    canonicalLiability", liab);
+                emit log_named_int("    roundingEth       ", r);
+                emit log_named_uint("    residualEth       ", resid);
+                rounding = r;
+            }
+        }
+    }
+
+    uint256 public maxResidualEthSeen;
+    uint256 public minResidualEthSeen = type(uint256).max;
+    uint256 public maxResidualTokenSeen;
+    uint256 public maxDeferredSeen;
+
+    /// @notice Randomized differential. Arbitrary interleavings must stay bit-exact against the
+    ///         unchanged reference, and the hook's ETH rounding reserve must always equal its
+    ///         actual native ERC6909 claim balance.
+    /// @dev STILL SKIPPED - progress, but not solved. Your hypothesis was CONFIRMED: rounding
+    ///      WAS being given away as revenue (+205,932,580,071,922 wei on the very first buy),
+    ///      which is why a later -27,050,896,760,906 shortfall had nothing to draw on. The
+    ///      symmetric ETH ledger fixes that specific seed, and fuzzing now reaches run ~183
+    ///      instead of ~4. Two further obstacles remain:
+    ///        1. TOKEN side has the same disease: residualToken drained to 23,196 against a
+    ///           75,387 demand. Raising TICK_LOWER_BUMP to 6 spacings pushed it further out but
+    ///           did not eliminate it.
+    ///        2. When the ETH deficit exceeds that trade's own canonical liability (trades with
+    ///           little or no tax), payable_ clamps to 0 while the hook's ledger sits at
+    ///           liab - deficit < 0, and nothing can cover it -> CurrencyNotSettled().
+    ///      Per the agreed stop condition the residual-ledger idea alone is insufficient;
+    ///      position rounding needs revisiting. Do NOT read the suite's green status as
+    ///      covering randomized sequences.
     function testFuzz_randomizedDifferential(uint96[10] calldata amts, uint8 pattern) public {
         vm.skip(true);
-        uint256 maxResidual;
         for (uint256 i = 0; i < amts.length; i++) {
             bool doBuy = (pattern >> (i % 8)) & 1 == 1 || token.balanceOf(trader) == 0;
             if (doBuy) {
@@ -463,10 +514,20 @@ contract ClogGenuineDifferentialTest is Test {
             _assertMatchesRef();
             _assertInvariants();
             _assertSlot0Canonical();
-            uint256 r = hook.residualToken(pid);
-            if (r > maxResidual) maxResidual = r;
-            // long-run bound: residual must stay far below 0.1% of supply
-            assertLt(r, 1_000_000e18, "residualToken exceeded 0.1% of supply");
+
+            // the reserve ledger must equal the hook's ACTUAL native ERC6909 claim
+            uint256 resid = hook.residualEth(pid);
+            assertEq(manager.balanceOf(address(hook), 0), resid, "residualEth != hook native claim");
+
+            uint256 rt = hook.residualToken(pid);
+            uint256 def = hook.deferredEthLiability(pid);
+            if (resid > maxResidualEthSeen) maxResidualEthSeen = resid;
+            if (resid < minResidualEthSeen) minResidualEthSeen = resid;
+            if (rt > maxResidualTokenSeen) maxResidualTokenSeen = rt;
+            if (def > maxDeferredSeen) maxDeferredSeen = def;
+
+            assertLt(rt, 1_000_000e18, "residualToken exceeded 0.1% of supply");
+            assertLt(def, 1e12, "deferred ETH liability exceeded 1e12 wei");
         }
     }
 
