@@ -64,7 +64,10 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
 
     /// @dev Target settlement surplus per re-anchor, in wei of currency0. Set above the measured
     ///      4-7 wei one-directional ETH shortfall with headroom.
-    uint256 internal constant TRIM_WEI = 64;
+    /// @notice Strict per-trade upper bound on the v4 settlement cost, in wei of currency0.
+    ///         Measured worst case is 7 wei across PRODUCT/LO/HI over 50-trade sequences; this
+    ///         is an order of magnitude above it and is ASSERTED, not assumed.
+    uint256 internal constant MAX_SETTLEMENT_COST = 100;
 
     struct PoolState {
         address market;
@@ -96,6 +99,8 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     /// @notice Tokens held by the hook: the SINGLE_LAUNCH bootstrap remainder plus any
     ///         unavoidable integer-wei dust PoolManager leaves. Bounded in tests.
     mapping(PoolId => uint256) public residualToken;
+    /// @notice Cumulative v4 settlement cost absorbed by the WinnerPot residual. Asserted.
+    mapping(PoolId => uint256) public settlementCostPaid;
 
     Pending internal _p;
     address internal _withdrawMarket;
@@ -466,9 +471,32 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     function _settle(PoolKey calldata key, PoolId id, int256 r0, int256 r1, Pending memory p) internal {
         address market = pools[id].market;
         emit SettleCheck(p.isBuy, r0, r1, p.canonicalLiability);
+
+        // ── ETH side ────────────────────────────────────────────────────────────────────────
+        // PoolManager rounds liquidity removal DOWN and addition UP, so six-to-eight
+        // modifyLiquidity calls per trade leave r0 a few wei BELOW canonicalLiability. Measured
+        // across all three transportation-table solutions (PRODUCT / LO / HI) the per-trade ETH
+        // delta is NEVER positive - 0 max, -5..-7 min - so no choice of the free hh parameter
+        // can close it. It is a genuine Uniswap v4 settlement cost, not an accounting error.
+        //
+        // POLICY: owner and multisig claims - the ones ClogMarket records in
+        // pendingWithdrawals - stay FULLY backed. The cost is deducted from the WinnerPot
+        // portion, which is not represented in pendingWithdrawals, so nothing is ever silently
+        // under-backed and no debt accumulates.
         if (r0 > 0) {
             uint256 owed = uint256(r0);
-            uint256 wp = p.winnerPotShare > owed ? owed : p.winnerPotShare;
+            uint256 liab = p.canonicalLiability;
+            uint256 wp = p.winnerPotShare;
+            if (owed < liab) {
+                uint256 cost = liab - owed;
+                require(cost <= MAX_SETTLEMENT_COST, "settlement cost above bound");
+                require(cost <= wp, "settlement cost exceeds WinnerPot residual");
+                wp -= cost;
+                settlementCostPaid[id] += cost;
+            } else if (owed > liab) {
+                wp += owed - liab; // surplus also belongs to the WinnerPot residual
+            }
+            if (wp > owed) wp = owed;
             if (wp > 0) {
                 poolManager.mint(rewardVault, 0, wp);
                 IRewardVaultRecorderG(rewardVault).recordWinnerPotClaim(wp);

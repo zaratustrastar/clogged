@@ -76,11 +76,14 @@ contract DustMeasurementTest is Test {
     uint256 trades;
     bool bootstrapSeen;
 
-    function setUp() public {
+    uint256 public activePosSum;
+    uint256 public reanchors;
+
+    function _setUpMode(ClogFourPositionMath.HhMode m) internal {
         vm.warp(1_700_000_000);
         manager = new PoolManager(address(this));
         nft = new TickerNFT("D", "D", deployer, "https://x/", multisig);
-        geometry = new ClogFourPositionMath();
+        geometry = new ClogFourPositionMath(m);
         bytes32 h = keccak256(
             abi.encodePacked(
                 type(ClogGenuineLiquidityHook).creationCode,
@@ -115,6 +118,20 @@ contract DustMeasurementTest is Test {
         hook.registerPool(key, address(market), SEED);
         manager.initialize(key, ClogGenuineMath.sqrtPriceX96Of(market.re(), market.rt()));
         hook.launch(key, market.re(), market.rt());
+    }
+
+    function setUp() public {
+        _setUpMode(ClogFourPositionMath.HhMode.PRODUCT);
+    }
+
+    /// @dev Live (non-zero) positions the CURRENT canonical state would install.
+    function _countActive() internal {
+        ClogFourPositionMath.Quad[4] memory q =
+            geometry.allQuads(market.re(), market.rt(), SEED, 800_000_000e18);
+        uint256 n;
+        for (uint256 i = 0; i < 4; i++) if (q[i].liquidity > 0) n++;
+        activePosSum += n;
+        reanchors++;
     }
 
     uint8 modeBefore;
@@ -161,6 +178,7 @@ contract DustMeasurementTest is Test {
             ""
         );
         _record();
+        _countActive();
     }
 
     function _sell(uint256 amt) internal {
@@ -180,6 +198,7 @@ contract DustMeasurementTest is Test {
         );
         vm.stopPrank();
         _record();
+        _countActive();
     }
 
     function _report(string memory label) internal {
@@ -193,12 +212,42 @@ contract DustMeasurementTest is Test {
         emit log_named_int("  max -ve token dust     ", maxNegTok);
         emit log_named_int("  min cumulative token   ", minCumTok);
         emit log_named_int("  max cumulative token   ", maxCumTok);
+        if (reanchors > 0) {
+            emit log_named_uint("  avg live positions x100", activePosSum * 100 / reanchors);
+        }
     }
 
     /// @dev instrumentation only: lets a negative dust step proceed so the series is observable
     /// @dev No pre-funding any more. The boundary clamp that previously forced it is handled by
     ///      SINGLE_BOUNDARY, so any revert here is a genuine accounting failure.
     function _prefund() internal {}
+
+    function _scenario() internal {
+        _buy(1 ether);
+        for (uint256 i = 0; i < 25; i++) {
+            if (market.physicalInventory() < 200_000_000e18) break;
+            _buy(0.2 ether);
+            uint256 b = token.balanceOf(trader);
+            if (b > 2e18 && market.realETH() > 0) _sell(b / 4);
+        }
+    }
+
+    function test_M0_product() public {
+        _scenario();
+        _report("MODE PRODUCT (hh = LAh*LBh/L)");
+    }
+
+    function test_M1_lo() public {
+        _setUpMode(ClogFourPositionMath.HhMode.LO);
+        _scenario();
+        _report("MODE LO (hh = max(0, LAh+LBh-L))");
+    }
+
+    function test_M2_hi() public {
+        _setUpMode(ClogFourPositionMath.HhMode.HI);
+        _scenario();
+        _report("MODE HI (hh = min(LAh, LBh))");
+    }
 
     function test_A1_repeatedBuys() public {
         _prefund();

@@ -36,6 +36,28 @@ import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 ///      via_ir - bisected: the library compiles standalone, and the hook compiles once those two
 ///      calls are removed. One external pure call per re-anchor; gas measured in the suite.
 contract ClogFourPositionMath {
+    /// @notice Which feasible transportation-table solution to use.
+    /// @dev LAh and LBh are the ROW and COLUMN sums, so every one of the three continuous
+    ///      constraints is satisfied for ANY hh in [lo, hi] - the table is not unique. At either
+    ///      endpoint one cell is exactly zero, so the exact representation normally needs only
+    ///      THREE live positions, not four. That is not in tension with "a FIXED choice of three
+    ///      can demand negative liquidity": here the omitted corner is chosen dynamically from
+    ///      the current canonical state, deterministically.
+    ///        PRODUCT: hh = LAh*LBh/L  (interior, 4 live cells)
+    ///        LO     : hh = max(0, LAh+LBh-L)  -> q00 or q11 is zero
+    ///        HI     : hh = min(LAh, LBh)      -> q01 or q10 is zero
+    enum HhMode {
+        PRODUCT,
+        LO,
+        HI
+    }
+
+    HhMode public immutable hhMode;
+
+    constructor(HhMode m) {
+        hhMode = m;
+    }
+
     uint256 internal constant Q96 = 0x1000000000000000000000000;
 
     error DegenerateState();
@@ -89,7 +111,7 @@ contract ClogFourPositionMath {
     /// @dev  token side: g_x = L*sqrt(Pa_x)  ->  LAh = L*(vTok - g_l)/(g_h - g_l)
     ///       ETH side  : f_x = L/sqrt(Pb_x)  ->  LBh = L*(f_l - vEth)/(f_l - f_h)
     ///       then the 2x2 cell (Ah,Bh) is pinned inside the feasible box so BOTH margins hold.
-    function solveMargins(Grid memory g, uint256 vEth, uint256 vTok) public pure returns (Weights memory w) {
+    function solveMargins(Grid memory g, uint256 vEth, uint256 vTok) public view returns (Weights memory w) {
         {
             uint256 gl = Math.mulDiv(g.L, g.Al, Q96);
             uint256 gh = Math.mulDiv(g.L, g.Ah, Q96);
@@ -102,11 +124,18 @@ contract ClogFourPositionMath {
             w.LBh = (fl > fh && fl > vEth) ? Math.mulDiv(g.L, fl - vEth, fl - fh) : 0;
             if (w.LBh > g.L) w.LBh = g.L;
         }
-        uint256 hh = Math.mulDiv(w.LAh, w.LBh, g.L);
         uint256 lo = w.LAh + w.LBh > g.L ? w.LAh + w.LBh - g.L : 0;
         uint256 hi = w.LAh < w.LBh ? w.LAh : w.LBh;
-        if (hh < lo) hh = lo;
-        if (hh > hi) hh = hi;
+        uint256 hh;
+        if (hhMode == HhMode.LO) {
+            hh = lo;
+        } else if (hhMode == HhMode.HI) {
+            hh = hi;
+        } else {
+            hh = Math.mulDiv(w.LAh, w.LBh, g.L);
+            if (hh < lo) hh = lo;
+            if (hh > hi) hh = hi;
+        }
         w.hh = hh;
     }
 
@@ -125,7 +154,7 @@ contract ClogFourPositionMath {
     /// @notice One external call per re-anchor: the complete 2x2 table for a canonical state.
     function allQuads(uint256 re, uint256 rt, uint256 vEth, uint256 vTok)
         external
-        pure
+        view
         returns (Quad[4] memory out)
     {
         Grid memory g = deriveGrid(re, rt, vEth, vTok);

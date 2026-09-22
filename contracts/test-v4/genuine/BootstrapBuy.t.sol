@@ -65,7 +65,7 @@ contract BootstrapBuyTest is Test {
         vm.warp(1_700_000_000);
         manager = new PoolManager(address(this));
         nft = new TickerNFT("B", "B", deployer, "https://x/", multisig);
-        geometry = new ClogFourPositionMath();
+        geometry = new ClogFourPositionMath(ClogFourPositionMath.HhMode.HI);
 
         bytes32 h = keccak256(
             abi.encodePacked(
