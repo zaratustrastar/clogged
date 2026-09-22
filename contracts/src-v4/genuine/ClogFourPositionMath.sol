@@ -151,6 +151,63 @@ contract ClogFourPositionMath {
         return Quad(g.al, g.bl, uint128((g.L + w.hh) - w.LAh - w.LBh));
     }
 
+    /// @notice NEAR_BOUNDARY representation: TWO positions sharing the upper bound Bh (the tick
+    ///         strictly ABOVE the canonical price), with lower bounds at the two neighbouring Pa
+    ///         ticks.
+    ///
+    ///   WHY THE THREE-POSITION FORM CANNOT BE PATCHED HERE. The ETH-offset margin
+    ///   SUM Li/sqrt(Pb_i) = virtualEthSeed needs the Pb ticks to BRACKET the ideal Pb. Since
+    ///   P <= Pb always (P/Pb = (vEth/re)^2), the canonical price can rise above the LOWER of
+    ///   those two ticks while still below Pb - a sub-tick band, entered at
+    ///   realETH < vEth*(sqrt(1.0001)-1) ~ 0.00045 ETH. Any position whose upper bound sits
+    ///   below P is out of range and holds no currency0, so the margin stops reconstructing.
+    ///   Shifting the bracket up would put vEth outside it, breaking the same margin.
+    ///
+    ///   WHAT THIS FORM GUARANTEES INSTEAD. Settlement only needs the minted geometry to hold
+    ///   EXACTLY (realETH, physicalInventory) at the canonical price - that is what makes
+    ///   r0 == canonicalLiability. With both upper bounds at Bh and both positions in range:
+    ///       realETH  = (L1+L2) * (1/sqrt(P) - 1/sqrt(Bh))        -> fixes L1+L2
+    ///       physInv  = L1*(sqrt(P)-sqrt(Al)) + L2*(sqrt(P)-sqrt(Ah)) -> fixes the split
+    ///   Two equations, two unknowns, both in range. The virtual offsets drift within this
+    ///   sub-tick band, but the hook reconciles user output exactly and traverses slot0 to the
+    ///   canonical price, so canonical ClogMarket state and user output are unaffected.
+    function boundaryPair(uint256 realEth, uint256 physInv, uint160 sqrtP, int24 tickBelowP)
+        external
+        pure
+        returns (Quad[2] memory out)
+    {
+        int24 bh = tickBelowP + 1; // strictly above P
+        uint160 Bh = TickMath.getSqrtPriceAtTick(bh);
+        if (Bh <= sqrtP || realEth == 0) revert DegenerateState();
+
+        // L_total = realEth * sqrt(P) * sqrt(Bh) / ((sqrt(Bh) - sqrt(P)) * Q96)
+        uint256 lTotal;
+        {
+            uint256 num = Math.mulDiv(realEth, uint256(sqrtP), Q96);
+            lTotal = Math.mulDiv(num, uint256(Bh), uint256(Bh) - uint256(sqrtP));
+        }
+        if (lTotal == 0) revert DegenerateState();
+
+        // pick the Pa bracket from the token side of the same canonical state
+        int24 al = TickMath.getTickAtSqrtPrice(uint160(Math.mulDiv(physInv, Q96, lTotal) < uint256(sqrtP)
+            ? uint160(uint256(sqrtP) - Math.mulDiv(physInv, Q96, lTotal))
+            : TickMath.MIN_SQRT_PRICE + 1));
+        uint160 Al = TickMath.getSqrtPriceAtTick(al);
+        uint160 Ah = TickMath.getSqrtPriceAtTick(al + 1);
+
+        // L1*(sqrt(P)-Al) + (lTotal-L1)*(sqrt(P)-Ah) = physInv*Q96
+        //   => L1 = (physInv*Q96 - lTotal*(sqrt(P)-Ah)) / (Ah - Al)
+        uint256 rhsTotal = Math.mulDiv(lTotal, uint256(sqrtP) - uint256(Ah), Q96);
+        uint256 l1;
+        if (physInv > rhsTotal && Ah > Al) {
+            l1 = Math.mulDiv(physInv - rhsTotal, Q96, uint256(Ah) - uint256(Al));
+        }
+        if (l1 > lTotal) l1 = lTotal;
+
+        out[0] = Quad(al, bh, uint128(l1));
+        out[1] = Quad(al + 1, bh, uint128(lTotal - l1));
+    }
+
     /// @notice One external call per re-anchor: the complete 2x2 table for a canonical state.
     function allQuads(uint256 re, uint256 rt, uint256 vEth, uint256 vTok)
         external

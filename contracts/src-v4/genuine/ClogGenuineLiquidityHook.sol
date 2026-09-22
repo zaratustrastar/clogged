@@ -54,7 +54,8 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
     enum GeometryMode {
         NONE,
         SINGLE_BOUNDARY,
-        FOUR_EXACT
+        FOUR_EXACT,
+        NEAR_BOUNDARY
     }
 
     IPoolManager public immutable poolManager;
@@ -200,6 +201,16 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         PoolId id = key.toId();
         ClogGenuineMath.Position memory np =
             ClogGenuineMath.positionFor(re, rt, pools[id].virtualEthSeed, key.tickSpacing);
+
+        // Apply the SAME reserve trim as _mintBoundaryPosition. _doLaunch has its own mint path
+        // and was missing it, so the bootstrap re-anchor could land 3 wei short of the hook's
+        // token balance and revert TokenReserveExhausted.
+        if (rt > ClogGenuineMath.VIRTUAL_TOKEN_OFFSET) {
+            uint256 physInv0 = rt - ClogGenuineMath.VIRTUAL_TOKEN_OFFSET;
+            uint256 cut0 = (TOKEN_SETTLEMENT_RESERVE * uint256(np.liquidity)) / physInv0 + 1;
+            if (cut0 < np.liquidity) np.liquidity = uint128(uint256(np.liquidity) - cut0);
+        }
+
         (BalanceDelta d,) = poolManager.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams({
@@ -375,9 +386,55 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         if (p.realEth1 == 0) {
             net = net + _mintBoundaryPosition(key, id, p);
             pools[id].mode = GeometryMode.SINGLE_BOUNDARY;
-        } else {
+        } else if (_exactFormValid(id, p)) {
             net = net + _mintExactPositions(key, id, p);
             pools[id].mode = GeometryMode.FOUR_EXACT;
+        } else {
+            net = net + _mintNearBoundary(key, id, p);
+            pools[id].mode = GeometryMode.NEAR_BOUNDARY;
+        }
+    }
+
+    /// @dev Is the exact interpolation VALID at the canonical price? It is only valid while
+    ///      every contributing position is in range:
+    ///          max(active lower bounds) < canonical sqrtP < min(active upper bounds)
+    ///      Because P <= Pb always, P can rise above the LOWER Pb tick while still below Pb -
+    ///      a sub-tick band. Mode is now chosen on this test, not on realETH == 0.
+    function _exactFormValid(PoolId id, Pending memory p) internal view returns (bool) {
+        uint160 sqrtP = ClogGenuineMath.sqrtPriceX96Of(p.re1, p.rt1);
+        FP.Quad[4] memory qs =
+            geometry.allQuads(p.re1, p.rt1, pools[id].virtualEthSeed, ClogGenuineMath.VIRTUAL_TOKEN_OFFSET);
+        for (uint256 i = 0; i < 4; i++) {
+            if (qs[i].liquidity == 0) continue;
+            if (TickMath.getSqrtPriceAtTick(qs[i].tickUpper) <= sqrtP) return false;
+            if (TickMath.getSqrtPriceAtTick(qs[i].tickLower) >= sqrtP) return false;
+        }
+        return true;
+    }
+
+    /// @dev Sub-tick transition band: two positions holding EXACTLY (realETH, physicalInventory).
+    function _mintNearBoundary(PoolKey calldata key, PoolId id, Pending memory p)
+        internal
+        returns (BalanceDelta net)
+    {
+        uint160 sqrtP = ClogGenuineMath.sqrtPriceX96Of(p.re1, p.rt1);
+        uint256 physInv = p.rt1 - ClogGenuineMath.VIRTUAL_TOKEN_OFFSET;
+        FP.Quad[2] memory pair =
+            geometry.boundaryPair(p.realEth1, physInv, sqrtP, TickMath.getTickAtSqrtPrice(sqrtP));
+        for (uint256 i = 0; i < 2; i++) {
+            quads[id][i] = pair[i];
+            if (pair[i].liquidity == 0) continue;
+            (BalanceDelta d,) = poolManager.modifyLiquidity(
+                key,
+                IPoolManager.ModifyLiquidityParams({
+                    tickLower: pair[i].tickLower,
+                    tickUpper: pair[i].tickUpper,
+                    liquidityDelta: int256(uint256(pair[i].liquidity)),
+                    salt: bytes32(i)
+                }),
+                ""
+            );
+            net = net + d;
         }
     }
 
@@ -461,6 +518,12 @@ contract ClogGenuineLiquidityHook is IHooks, IUnlockCallback {
         // remaining ETH shortfall is attributed below.
         for (uint256 i = 0; i < 4; i++) {
             FP.Quad memory q = qs[i];
+            // PoolManager rounds the amount OWED for a mint UP, ~1 wei per position, while the
+            // burn rounded DOWN - so the mint can need a few token-wei more than the burn just
+            // returned. Trimming ONE unit of liquidity per position frees ~physInv/L token-wei
+            // each (~7.7e3 here), which covers it with margin. Relative cost ~1e-23: far below
+            // the offsets it protects, and it never touches user output or ClogMarket.
+            if (q.liquidity > 1) q.liquidity -= 1;
             quads[id][i] = q;
             if (q.liquidity == 0) continue;
             (BalanceDelta d,) = poolManager.modifyLiquidity(

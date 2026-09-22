@@ -142,6 +142,8 @@ contract BootstrapBuyTest is Test {
         assertEq(uint8(hook.geometryMode(pid)), 2, "must be FOUR_EXACT after the bootstrap trade");
     }
 
+    function extSell(uint256 a) external { _sell(a); }
+
     function _sell(uint256 amt) internal {
         vm.recordLogs();
         vm.startPrank(trader);
@@ -162,6 +164,7 @@ contract BootstrapBuyTest is Test {
     uint8 constant NONE = 0;
     uint8 constant BOUNDARY = 1;
     uint8 constant FOUR = 2;
+    uint8 constant NEAR = 3;
 
     function _mode() internal view returns (uint8) {
         return uint8(hook.geometryMode(pid));
@@ -201,6 +204,41 @@ contract BootstrapBuyTest is Test {
             assertEq(_mode(), BOUNDARY, "cycle must return to SINGLE_BOUNDARY");
         }
         assertEq(address(hook).balance, hookEth0, "no protocol ETH consumed across cycles");
+    }
+
+    /// @notice Crossing INTO and OUT OF the sub-tick NEAR_BOUNDARY band, repeatedly.
+    ///         The band is realETH < ~0.00045 ETH, so selling almost everything lands in it.
+    function test_6_nearBoundaryCrossings() public {
+        uint256 hookEth0 = address(hook).balance;
+        bool sawNear;
+        for (uint256 c = 0; c < 8; c++) {
+            _buy(0.2 ether);
+            assertEq(_mode(), FOUR, "buy should give THREE_EXACT (FOUR_EXACT enum)");
+
+            // bisect the sell size so realETH is driven arbitrarily close to zero, which is
+            // where the sub-tick band lives (realETH < ~0.00045 ETH)
+            uint256 frac = 2;
+            for (uint256 k = 0; k < 24; k++) {
+                uint256 b = token.balanceOf(trader);
+                if (b < 1e12 || market.realETH() == 0) break;
+                uint256 amt = b - b / frac;
+                if (amt == 0) break;
+                try this.extSell(amt) { } catch { frac *= 2; continue; }
+                uint8 m = _mode();
+                if (m == NEAR) {
+                    sawNear = true;
+                    assertGt(market.realETH(), 0, "NEAR_BOUNDARY must have realETH > 0");
+                    break;
+                }
+                if (m == BOUNDARY) break;
+                frac *= 2;
+            }
+            // and back out of the band
+            _buy(0.05 ether);
+            assertTrue(_mode() == FOUR || _mode() == NEAR, "buy must leave a valid mode");
+        }
+        assertTrue(sawNear, "the NEAR_BOUNDARY band was never exercised");
+        assertEq(address(hook).balance, hookEth0, "no protocol ETH consumed across crossings");
     }
 
     /// @notice Many FOUR_EXACT trades: bound the dust empirically rather than assuming it.
