@@ -60,6 +60,10 @@ contract ClogFourPositionMath {
 
     uint256 internal constant Q96 = 0x1000000000000000000000000;
 
+    /// @dev Liquidity units shaved off each NEAR_BOUNDARY position so the mint can never need
+    ///      more token than the burn just returned. See boundaryPair.
+    uint256 internal constant TRIM_UNITS = 64;
+
     error DegenerateState();
     error PriceOutOfRange();
 
@@ -204,8 +208,17 @@ contract ClogFourPositionMath {
         }
         if (l1 > lTotal) l1 = lTotal;
 
+        // Conservative trim. PoolManager rounds the amount OWED for a mint UP, ~1 wei per
+        // position, so the pair can need a few token-wei more than the burn returned - measured
+        // exactly 3 wei short at bootstrap. Token per unit of liquidity here is physInv/L
+        // (~1.4e4 wei), so shaving a few units frees far more than enough. ETH per unit of
+        // liquidity is realETH/L (~1e-9 wei), so the currency0 backing is untouched.
+        uint256 l2 = lTotal - l1;
+        if (l1 > TRIM_UNITS) l1 -= TRIM_UNITS;
+        if (l2 > TRIM_UNITS) l2 -= TRIM_UNITS;
+
         out[0] = Quad(al, bh, uint128(l1));
-        out[1] = Quad(al + 1, bh, uint128(lTotal - l1));
+        out[1] = Quad(al + 1, bh, uint128(l2));
     }
 
     /// @notice One external call per re-anchor: the complete 2x2 table for a canonical state.

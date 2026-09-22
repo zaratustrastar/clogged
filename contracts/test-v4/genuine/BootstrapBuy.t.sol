@@ -206,39 +206,68 @@ contract BootstrapBuyTest is Test {
         assertEq(address(hook).balance, hookEth0, "no protocol ETH consumed across cycles");
     }
 
-    /// @notice Crossing INTO and OUT OF the sub-tick NEAR_BOUNDARY band, repeatedly.
-    ///         The band is realETH < ~0.00045 ETH, so selling almost everything lands in it.
+    /// @notice The sub-tick NEAR_BOUNDARY band, entered and left in both directions.
+    /// @dev A SMALL first buy lands straight in it: realETH after 0.01 ETH is ~9.5e13 wei,
+    ///      already below the analytic threshold vEth*(sqrt(1.0001)-1) ~ 4.5e14 wei.
     function test_6_nearBoundaryCrossings() public {
         uint256 hookEth0 = address(hook).balance;
-        bool sawNear;
-        for (uint256 c = 0; c < 8; c++) {
-            _buy(0.2 ether);
-            assertEq(_mode(), FOUR, "buy should give THREE_EXACT (FOUR_EXACT enum)");
 
-            // bisect the sell size so realETH is driven arbitrarily close to zero, which is
-            // where the sub-tick band lives (realETH < ~0.00045 ETH)
-            uint256 frac = 2;
-            for (uint256 k = 0; k < 24; k++) {
-                uint256 b = token.balanceOf(trader);
-                if (b < 1e12 || market.realETH() == 0) break;
-                uint256 amt = b - b / frac;
-                if (amt == 0) break;
-                try this.extSell(amt) { } catch { frac *= 2; continue; }
-                uint8 m = _mode();
-                if (m == NEAR) {
-                    sawNear = true;
-                    assertGt(market.realETH(), 0, "NEAR_BOUNDARY must have realETH > 0");
-                    break;
-                }
-                if (m == BOUNDARY) break;
-                frac *= 2;
-            }
-            // and back out of the band
-            _buy(0.05 ether);
-            assertTrue(_mode() == FOUR || _mode() == NEAR, "buy must leave a valid mode");
+        // 0.0001 ETH leaves realETH ~9.5e13 wei, inside the band; 0.01 ETH would leave ~9.4e15
+        // and sit safely outside it.
+        _buy(0.0001 ether);
+        assertEq(_mode(), NEAR, "a small first buy must land in NEAR_BOUNDARY");
+        assertGt(market.realETH(), 0, "NEAR_BOUNDARY must have realETH > 0");
+        assertLt(market.realETH(), 0.00045 ether, "must be inside the analytic band");
+
+        // buy back out of the band into the exact form
+        _buy(1 ether);
+        assertEq(_mode(), FOUR, "a larger buy must leave the band for THREE_EXACT");
+        assertGt(market.realETH(), 0.00045 ether, "must be outside the band");
+
+        // and back down into it, repeatedly
+        for (uint256 c = 0; c < 4; c++) {
+            uint256 b = token.balanceOf(trader);
+            _sell(b - b / 64);
+            uint8 m = _mode();
+            assertTrue(m == NEAR || m == BOUNDARY || m == FOUR, "mode must stay valid");
+            _buy(1 ether);
+            assertEq(_mode(), FOUR, "buy must restore THREE_EXACT");
         }
-        assertTrue(sawNear, "the NEAR_BOUNDARY band was never exercised");
+
         assertEq(address(hook).balance, hookEth0, "no protocol ETH consumed across crossings");
+    }
+
+    /// @notice Measured gas for every path, plus the settlement-cost / reserve high-water marks
+    ///         and the token conservation identity.
+    function test_7_gasAndConservation() public {
+        uint256 g;
+
+        g = gasleft(); _buy(0.5 ether); uint256 gFirst = g - gasleft();
+        g = gasleft(); _buy(0.3 ether); uint256 gBuy = g - gasleft();
+        g = gasleft(); _sell(token.balanceOf(trader) / 4); uint256 gSell = g - gasleft();
+        g = gasleft(); _sell(token.balanceOf(trader)); uint256 gCapped = g - gasleft();
+        assertEq(market.realETH(), 0, "that should have capped");
+        g = gasleft(); _buy(0.4 ether); uint256 gAfterCapped = g - gasleft();
+
+        emit log_named_uint("GAS first buy       ", gFirst);
+        emit log_named_uint("GAS normal buy      ", gBuy);
+        emit log_named_uint("GAS normal sell     ", gSell);
+        emit log_named_uint("GAS capped sell     ", gCapped);
+        emit log_named_uint("GAS buy after capped", gAfterCapped);
+        emit log_named_uint("max ETH settlement cost (wei)", hook.maxSettlementCost(pid));
+        emit log_named_uint("max token reserve used (wei) ", hook.maxTokenReserveUsed(pid));
+
+        // conservation: pool LP + hook settlement reserve + circulating == total supply
+        uint256 inPool = token.balanceOf(address(manager));
+        uint256 reserve = token.balanceOf(address(hook));
+        uint256 circulating = token.balanceOf(trader);
+        assertEq(inPool + reserve + circulating, 1_000_000_000e18, "token conservation");
+
+        // the reserve is NOT user or CLOG revenue: it is not in pendingWithdrawals and not in
+        // any WinnerPot claim
+        assertEq(market.pendingWithdrawals(address(hook)), 0, "reserve must not be a liability");
+        assertGt(reserve, 0, "reserve should be held");
+        assertLt(reserve, 1e18, "reserve must stay microscopic");
     }
 
     /// @notice Many FOUR_EXACT trades: bound the dust empirically rather than assuming it.
