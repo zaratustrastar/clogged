@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { MachineHeader } from "@/components/layout/MachineHeader";
 import { BasePlate } from "@/components/layout/BasePlate";
+import { PublicLaunchGate } from "@/components/layout/PublicLaunchGate";
 import { Web3Provider } from "@/lib/web3/Web3Provider"; // real path - handoff assumed @/components/providers/Web3Provider, which does not exist
 import { env } from "@/lib/web3/env";
 import "./globals.css";
@@ -105,11 +106,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           } as React.CSSProperties
         }
       >
-        <Web3Provider>
-          <MachineHeader />
-          <main>{children}</main>
-          <BasePlate />
-        </Web3Provider>
+        {/* The gate wraps Web3Provider rather than sitting inside it, so that
+            before launch NOTHING in the application subtree renders: no wallet
+            provider, no MachineHeader, no protocol hooks. At T-0 the gate's own
+            interval swaps the subtree in on the open page, with no refresh and
+            no server restart. Route handlers under /api/... are untouched -
+            a root layout does not wrap them. */}
+        <PublicLaunchGate>
+          <Web3Provider>
+            <MachineHeader />
+            <main>{children}</main>
+            <BasePlate />
+          </Web3Provider>
+        </PublicLaunchGate>
       </body>
     </html>
   );
